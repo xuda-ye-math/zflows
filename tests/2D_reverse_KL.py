@@ -1,6 +1,9 @@
+from pathlib import Path
 import torch
 from zflows import NSF, compute_ESS_log
 from zflows.potential import Potential, Gaussian
+
+HERE = Path(__file__).resolve().parent
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -103,5 +106,5 @@ for ax in axes:
     ax.set_aspect("equal")
 
 plt.tight_layout()
-plt.savefig("test_2D_reverse_KL.png", dpi=150)
+plt.savefig(HERE / "2D_reverse_KL.png", dpi=150)
 plt.show()
