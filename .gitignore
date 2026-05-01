@@ -5,6 +5,9 @@
 # This bootstrap script
 git_init.sh
 
+# Local LaTeX-source backup of README (rendered version README.md is published)
+README_SRC.md
+
 # Build / packaging artifacts
 *.egg-info/
 build/
