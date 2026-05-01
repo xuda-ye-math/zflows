@@ -71,7 +71,7 @@ Three end-to-end scripts are provided. Run from the project root:
 python -m tests.2D_reverse_KL
 ```
 
-![reverse-KL test](tests/2D_reverse_KL.png)
+<p align="center"><img src="tests/2D_reverse_KL.png" alt="reverse-KL test" width="800px"></p>
 
 **Data-driven (forward $\mathrm{KL}$).** [`tests/2D_forward_KL.py`](tests/2D_forward_KL.py) trains an `NSF` on samples from a 3-mode Gaussian mixture — only `u1.samples(N)` is ever called.
 
@@ -79,7 +79,7 @@ python -m tests.2D_reverse_KL
 python -m tests.2D_forward_KL
 ```
 
-![forward-KL test](tests/2D_forward_KL.png)
+<p align="center"><img src="tests/2D_forward_KL.png" alt="forward-KL test" width="800px"></p>
 
 **Periodic target with rejuvenation.** [`tests/3D_periodic.py`](tests/3D_periodic.py) trains an `NCSF` on a von-Mises ridge mixture on the 3-torus $[-\pi, \pi]^3$, then runs the full pipeline: importance sampling → resample → `enable_grad` → Langevin rejuvenation.
 
@@ -87,4 +87,4 @@ python -m tests.2D_forward_KL
 python -m tests.3D_periodic
 ```
 
-![3D periodic test](tests/3D_periodic.png)
+<p align="center"><img src="tests/3D_periodic.png" alt="3D periodic test" width="400px"></p>
