@@ -1,7 +1,6 @@
 from pathlib import Path
 import torch
-from zflows import NSF, compute_ESS_log
-from zflows.potential import Potential, Gaussian
+from zflows import NSF, Potential, Gaussian, compute_ESS_log, reverse_KL
 
 HERE = Path(__file__).resolve().parent
 
@@ -20,23 +19,6 @@ class U1(Potential): # target potential
         return 0.5 * (x1 ** 2 + x2 ** 2) + 2 * torch.cos(x1)
     
 u1 = U1().to(device) # to(device) can be removed here
-
-# define KL loss function
-def reverse_KL_loss(x: torch.Tensor, source: Potential, target: Potential, flow: NSF):
-    """
-    The reverse KL divergence in energy-driven normalizing flow.
-    Estimates  E_{x ~ source}[ target(F(x)) - source(x) - log|det J_F(x)| ],
-    where F = flow.t() pushes source samples toward the target.
-    Input:
-        x:      Tensor [N, d]   samples drawn from the source distribution
-        source: Potential       negative log-density of the source (up to const)
-        target: Potential       negative log-density of the target (up to const)
-        flow:   NSF             normalizing flow providing F = flow.t()
-    Output:
-        loss: Tensor (scalar)   Monte Carlo estimate of the reverse KL
-    """
-    y, ladj = flow.t().call_and_ladj(x) # get y = F(x) and log_abs_det_jacobian
-    return (target(y) - source(x) - ladj).mean()
 
 # initialize Neural Spline Flow (NSF)
 flow = NSF(a=[-4, -4], b=[4, 4], bins=8, transforms=4, hidden_features=(64, 64)).to(device)
@@ -58,7 +40,7 @@ for epoch in range(EPOCH):
         idx = perm[start:start + BATCH]
         x_batch = x[idx]
 
-        loss = reverse_KL_loss(x_batch, source=u0, target=u1, flow=flow)
+        loss = reverse_KL(x_batch, target=u1, flow=flow)
 
         optimizer.zero_grad()
         loss.backward()
