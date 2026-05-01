@@ -1,4 +1,5 @@
 import torch
+from .potential import Potential
 
 def compute_ESS(weights: torch.Tensor) -> torch.Tensor:
     """
@@ -82,3 +83,35 @@ def resample(samples: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     probs = weights / weights.sum()
     idx = torch.multinomial(probs, N, replacement=True)
     return samples[idx]
+
+def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, iters: int = 100) -> torch.Tensor:
+    """
+    Overdamped Langevin dynamics targeting the distribution exp(-U(x)):
+
+        x_{k+1} = x_k - step * grad U(x_k) + sqrt(2 * step) * xi_k,
+        xi_k ~ N(0, I_d).
+
+    Requires `potential.enable_grad()` to have been called so that
+    `potential.grad(x)` is available; otherwise raises RuntimeError.
+
+    Input:
+        samples:   Tensor [N, d]   initial particles
+        potential: Potential       target potential U; must support .grad(x)
+        step:      float           Euler-Maruyama step size
+        iters:     int             number of Langevin steps
+    Output:
+        samples: Tensor [N, d]   particles after `iters` Langevin updates
+    """
+    if potential._grad_fn is None:
+        raise RuntimeError(
+            f"langevin() requires gradients on the potential; "
+            f"call {type(potential).__name__}.enable_grad() before passing it in."
+        )
+    noise_scale = (2.0 * step) ** 0.5
+    x = samples
+    for _ in range(iters):
+        x = x - step * potential.grad(x) + noise_scale * torch.randn_like(x)
+    return x
+
+# alias: in SMC literature, Langevin steps are the standard "rejuvenation" move
+rejuvenation = langevin

@@ -6,7 +6,17 @@ from torch import nn
 class Potential(nn.Module):
     """
     Generic Potential class. forward() computes the potential function.
+
+    By default, calling .grad(x) raises. Opt in with .enable_grad():
+
+        u = U1().to(device).enable_grad()
+        g = u.grad(x)   # [N, d], no requires_grad on x
+
+    The gradient is built once via torch.func.grad + torch.compile, batched
+    over the leading dim with vmap, and cached on the instance.
     """
+    _grad_fn = None # populated by enable_grad()
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Input:
@@ -15,6 +25,36 @@ class Potential(nn.Module):
             _: Tensor [N]
         """
         raise NotImplementedError
+
+    def enable_grad(self) -> "Potential":
+        """
+        Compile a fast .grad(x) using torch.func.grad + torch.compile, vmapped
+        over the batch dim. Returns self so the call can be chained, e.g.
+            u = Gaussian(...).to(device).enable_grad()
+        Idempotent: calling twice does not recompile.
+        """
+        if self._grad_fn is not None:
+            return self
+        single = lambda x: self.forward(x.unsqueeze(0)).squeeze(0) # [d] -> scalar
+        self._grad_fn = torch.compile(
+            torch.func.vmap(torch.func.grad(single)),
+            mode="reduce-overhead",
+        )
+        return self
+
+    def grad(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Input:
+            x: Tensor [N, d]
+        Output:
+            grad U(x): Tensor [N, d]
+        Raises RuntimeError if .enable_grad() has not been called.
+        """
+        if self._grad_fn is None:
+            raise RuntimeError(
+                f"{type(self).__name__}.grad() requires .enable_grad() first."
+            )
+        return self._grad_fn(x)
 
 class Uniform(Potential):
     """
