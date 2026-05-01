@@ -1,0 +1,24 @@
+# Hidden files (except .gitignore)
+.*
+!.gitignore
+
+# This bootstrap script
+git_init.sh
+
+# Build / packaging artifacts
+*.egg-info/
+build/
+dist/
+
+# Python bytecode caches
+__pycache__/
+**/__pycache__/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# Data / model checkpoints
+*.pth
+*.pt
+
