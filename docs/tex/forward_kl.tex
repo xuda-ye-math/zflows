@@ -1,0 +1,10 @@
+\documentclass[border=2pt,12pt]{standalone}
+\usepackage{amsmath,amssymb}
+\begin{document}
+$\displaystyle
+\begin{aligned}
+\mathrm{KL}(\mu_1 \,\|\, F_{\#}\mu_0)
+& = \int_{\mathbb{R}^d} \mu_1(y) \log \frac{\mu_1(y)}{(F_{\#}\mu_0)(y)} \, \mathrm{d}y \\
+& = \mathbb{E}_{y \sim \mu_1} \bigl[ U_0(F^{-1}(y)) + \log |\det J_F(F^{-1}(y))| \bigr] + \mathrm{const}.
+\end{aligned}$
+\end{document}
