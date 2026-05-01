@@ -60,11 +60,11 @@ Sampling problems on $\mathbb R^d$ fall into two broad categories:
 
 <!-- markdownlint-disable MD033 -->
 
-Despite their different setups, both reduce in the normalizing-flow framework to the same recipe: pick a tractable source distribution $\mu_0 \propto \exp(-U_0)$ and learn a diffeomorphism $F$ such that $F_{\#}\mu_0 \approx \mu_1$. The change-of-variable formula gives the pushforward density
+Despite their different setups, both reduce in the normalizing-flow framework to the same recipe: pick a tractable source distribution $\mu_0 \propto \exp(-U_0)$ and learn a diffeomorphism $F$ such that $F_{\sharp}\mu_0 \approx \mu_1$. The change-of-variable formula gives the pushforward density
 
 <div align="center"><img src="docs/figures/pushforward.svg" alt="pushforward density" /></div>
 
-where $J_F(x) \in \mathbb R^{d \times d}$ is the Jacobian of $F$ at $x$. The training objective is the $\mathrm{KL}$ divergence between $F_{\#}\mu_0$ and $\mu_1$.
+where $J_F(x) \in \mathbb R^{d \times d}$ is the Jacobian of $F$ at $x$. The training objective is the $\mathrm{KL}$ divergence between $F_{\sharp}\mu_0$ and $\mu_1$.
 
 For energy-based sampling we use the **reverse $\mathrm{KL}$**, which involves only the energy $U_1$ and not its normalizing constant:
 
@@ -74,7 +74,7 @@ Dropping the (parameter-independent) constant yields the trainable loss
 
 <div align="center"><img src="docs/figures/reverse_loss.svg" alt="reverse KL loss" /></div>
 
-For data-driven sampling we use the **forward $\mathrm{KL}$**, which is obtained by simply exchanging the positions of $F_{\#}\mu_0$ and $\mu_1$ in the $\mathrm{KL}$ divergence:
+For data-driven sampling we use the **forward $\mathrm{KL}$**, which is obtained by simply exchanging the positions of $F_{\sharp}\mu_0$ and $\mu_1$ in the $\mathrm{KL}$ divergence:
 
 <div align="center"><img src="docs/figures/forward_kl.svg" alt="forward KL derivation" /></div>
 
