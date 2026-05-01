@@ -109,3 +109,65 @@ class Gaussian(Potential):
         """
         z = torch.randn(N, self.d, device=self.device)
         return self.mean + self.variance.sqrt() * z
+    
+class Gaussian_Mixture(Potential):
+    """
+    Diagonal Gaussian mixture distribution with K components. The
+    unnormalized density is
+        mu(x) propto sum_k w_k * N(x | mean_k, diag(variance_k)),
+    and the potential U(x) = -log mu(x) (up to an additive constant).
+    """
+    def __init__(
+        self,
+        weights: torch.Tensor | list[float],
+        mean: torch.Tensor | list[list[float]],
+        variance: torch.Tensor | list[list[float]],
+        device: torch.device | str = "cpu",
+    ):
+        """
+        Input:
+            weights:  Tensor [K] or list[float]              mixture weights (non-negative, not required to be normalized)
+            mean:     Tensor [K, d] or list[list[float]]     per-component, per-coordinate mean
+            variance: Tensor [K, d] or list[list[float]]     per-component, per-coordinate variance (positive)
+            device:   torch.device | str                    device on which buffers live
+        """
+        super().__init__()
+        weights = torch.as_tensor(weights, dtype=torch.float32, device=device)
+        mean = torch.as_tensor(mean, dtype=torch.float32, device=device)
+        variance = torch.as_tensor(variance, dtype=torch.float32, device=device)
+        assert weights.ndim == 1 and mean.ndim == 2 and variance.ndim == 2
+        assert mean.shape == variance.shape
+        assert weights.shape[0] == mean.shape[0]
+        log_weights = weights.log() - torch.logsumexp(weights.log(), dim=0) # normalized log-weights
+        self.register_buffer("log_weights", log_weights)
+        self.register_buffer("mean", mean)
+        self.register_buffer("variance", variance)
+        self.K = mean.shape[0]
+        self.d = mean.shape[1]
+
+    @property
+    def device(self) -> torch.device:
+        return self.mean.device
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Input:
+            x: Tensor [N, d]
+        Output:
+            U(x): Tensor [N]
+        """
+        diff = x.unsqueeze(1) - self.mean.unsqueeze(0) # [N, K, d]
+        log_comp = -0.5 * (diff ** 2 / self.variance.unsqueeze(0)).sum(dim=-1) \
+                   - 0.5 * self.variance.log().sum(dim=-1).unsqueeze(0) # [N, K]
+        return -torch.logsumexp(self.log_weights.unsqueeze(0) + log_comp, dim=-1) # [N]
+
+    def samples(self, N: int) -> torch.Tensor:
+        """
+        Generate N independent samples from the diagonal Gaussian mixture
+        Output:
+            x: Tensor [N, d]
+        """
+        idx = torch.multinomial(self.log_weights.exp(), N, replacement=True) # [N]
+        z = torch.randn(N, self.d, device=self.device)
+        return self.mean[idx] + self.variance[idx].sqrt() * z
+

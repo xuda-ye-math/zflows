@@ -105,7 +105,7 @@ def reverse_KL(x: torch.Tensor, target: Potential, flow: NSF):
 def forward_KL(y: torch.Tensor, source: Potential, flow: NSF):
     """
     The forward KL divergence in data-driven normalizing flow.
-    Estimates  E_{y ~ target}[ -source(F^-1(y)) - log|det J_{F^-1}(y)| ],
+    Estimates  E_{y ~ target}[ source(F^-1(y)) - log|det J_{F^-1}(y)| ],
     where F = flow.t() pushes source samples toward the target.
     Input:
         y:      Tensor [N, d]   samples drawn from the target distribution
@@ -115,4 +115,4 @@ def forward_KL(y: torch.Tensor, source: Potential, flow: NSF):
         loss: Tensor (scalar)   Monte Carlo estimate of the forward KL
     """
     x, ladj = flow.t().inv.call_and_ladj(y) # x = F^-1(y), ladj = log|det J_{F^-1}(y)|
-    return (-source(x) - ladj).mean()
+    return (source(x) - ladj).mean()
