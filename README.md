@@ -59,6 +59,8 @@ python -c "import zflows; print(zflows.__doc__)"
 pip uninstall zflows
 ```
 
+## Mathematical background
+
 > **Note.** For best visual effects, open [`README.ipynb`](README.ipynb) in VS Code.
 
 ## Minimal examples
