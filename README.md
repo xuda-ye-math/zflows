@@ -25,8 +25,31 @@ See [`tests/test_2D_reverse_KL.ipynb`](tests/test_2D_reverse_KL.ipynb) (or the s
 
 ![reverse-KL test](tests/test_2D_reverse_KL.png)
 
-## Install
+## Installation
+
+`zflows` is a pure-Python package; the only runtime dependencies are [`torch`](https://pytorch.org) and [`zuko`](https://github.com/probabilists/zuko), which `pip` will resolve automatically.
+
+**1. Clone the repository.**
+
+```bash
+git clone https://github.com/xuda-ye-math/zflows.git
+cd zflows
+```
+
+**2. Install in editable mode.** This registers the package with your active Python environment while leaving the source tree in place, so any local edits take effect immediately:
 
 ```bash
 pip install -e .
+```
+
+**3. Verify the install.**
+
+```bash
+python -c "import zflows; print(zflows.__doc__)"
+```
+
+**Uninstall.**
+
+```bash
+pip uninstall zflows
 ```
