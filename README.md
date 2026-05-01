@@ -2,6 +2,8 @@
 
 A small convenience wrapper around [zuko](https://github.com/probabilists/zuko) for normalizing flows, with first-class support for energy-based sampling.
 
+> **Status: experimental.** This project has only been tested on **Linux + NVIDIA GPU**. Some features (notably `Potential.enable_grad`, which relies on `torch.compile`) are **not supported on Windows** — see e.g. [pytorch/pytorch#167062](https://github.com/pytorch/pytorch/issues/167062). On Windows you can still use `NSF` / `NCSF` / `reverse_KL` / `forward_KL` / `resample`, but skip `enable_grad` and the Langevin `rejuvenation` step.
+>
 > This project was developed with [Claude Code](https://claude.com/claude-code).
 
 ## Features
