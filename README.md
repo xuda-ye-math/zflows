@@ -2,6 +2,8 @@
 
 A small convenience wrapper around [zuko](https://github.com/probabilists/zuko) for energy-based normalizing flows on user-specified rectangular regions.
 
+> This project was developed with [Claude Code](https://claude.com/claude-code).
+
 ## Motivation
 
 `zuko` ships excellent normalizing-flow primitives but does not, out of the box:
