@@ -8,6 +8,7 @@ from zflows import NCSF, Potential, Uniform, compute_ESS_log, reverse_KL, resamp
 HERE = Path(__file__).resolve().parent
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+torch.manual_seed(0)
 
 # source: U0(x) = const   (uniform on [-pi, pi]^3)
 u0 = Uniform(a=[-math.pi, -math.pi, -math.pi], b=[math.pi, math.pi, math.pi]).to(device)

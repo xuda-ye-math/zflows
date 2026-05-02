@@ -5,6 +5,7 @@ from zflows import NSF, Potential, Gaussian, compute_ESS_log, reverse_KL
 HERE = Path(__file__).resolve().parent
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+torch.manual_seed(0)
 
 # source: U0(x) = (x1^2+x2^2)/2 (Gaussian prior)
 u0 = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device)

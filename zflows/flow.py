@@ -1,7 +1,7 @@
 # pyright: reportOperatorIssue=false, reportArgumentType=false, reportAttributeAccessIssue=false
 
+from abc import ABC, abstractmethod
 from functools import partial
-from typing import Protocol, runtime_checkable
 import torch
 from torch import Tensor, nn
 from zuko.transforms import (
@@ -9,6 +9,7 @@ from zuko.transforms import (
 )
 from zuko.flows import MAF
 from zuko.flows.spline import CircularRQSTransform
+from zuko.flows.continuous import FFJTransform
 from .potential import Potential
 
 """
@@ -17,16 +18,17 @@ unconditioned. The motivating use case is energy-based sampling, where
 the target distribution is fixed and accuracy on that single target
 matters more than the extra expressibility of a context-conditioned flow.
 """
-@runtime_checkable
-class Flow(Protocol):
+class Flow(nn.Module, ABC):
     """
-    Structural interface for any normalizing flow used by zflows.
+    Abstract base class for every normalizing flow in zflows.
 
-    A Flow is anything that exposes a `t()` method returning a zuko-style
-    ComposedTransform supporting `.inv` and `.call_and_ladj(x) -> (y, log|det J|)`.
-    Built-in implementations are NSF and NCSF; future CNF / RealNVP / etc.
-    classes need only provide `.t()` to be plug-compatible — no shared base
-    class is required.
+    Subclasses inherit nn.Module machinery (.to(device), .parameters(),
+    .state_dict(), .train()/.eval()) and must implement:
+
+        def t(self) -> ComposedTransform: ...
+
+    Built-in implementations are NSF and NCSF; future CNF / RealNVP /
+    etc. classes should inherit from Flow and override t().
 
     Canonical usage:
 
@@ -42,8 +44,9 @@ class Flow(Protocol):
     above), so `flow.t()` is the only supported access path. Do NOT call
     `flow().transform` directly in zflows code — wrap any new Flow
     implementation behind a `t()` method instead, so user code stays
-    uniform and the Protocol contract holds.
+    uniform and the Flow contract holds.
     """
+    @abstractmethod
     def t(self) -> ComposedTransform: ...
 
 
@@ -83,7 +86,7 @@ def call_and_ladj_grad(
     return y, ladj, ladj_grad
 
 
-class NSF(MAF):
+class NSF(Flow, MAF):
     """
     Neural Spline Flow whose transform is a bijection on the rectangle
     [a_1, b_1] x ... x [a_d, b_d].
@@ -164,7 +167,7 @@ class NSF(MAF):
             AffineTransform(loc=self.center, scale=self.halfwidth),
         )
 
-class NCSF(MAF):
+class NCSF(Flow, MAF):
     """
     Neural Circular Spline Flow whose transform is a bijection on the
     rectangle [a_1, b_1] x ... x [a_d, b_d], with each coordinate treated
@@ -245,6 +248,57 @@ class NCSF(MAF):
             inner,
             AffineTransform(loc=self.center, scale=self.halfwidth / torch.pi),
         )
+    
+class CNF(Flow):
+    """
+    Continuous normalizing flow (CNF) with a free-form Jacobian (FFJORD).
+
+    Acts as a bijection on the full unbounded R^d via an ODE drift learned
+    by an MLP. Unlike NSF / NCSF, no rectangular box is needed — CNFs live
+    on R^d natively, so `t()` returns the inner transform without affine
+    conjugation. The exact-log-det path is O(d) ODE evaluations per
+    Jacobian; pass `exact=False` to switch to a Hutchinson stochastic
+    estimate (faster, biased gradients during training).
+
+    Arguments:
+        dimension: number of features d.
+        freqs: number of time-embedding frequencies for the ODE drift.
+        atol, rtol: ODE-solver tolerances; smaller = more accurate, slower
+            (recommend: keep defaults unless training diverges).
+        exact: True for exact log|det J|, False for Hutchinson estimate.
+        hidden_features: ODE-MLP layer widths.
+        activation: ODE-MLP activation class (not instance).
+    """
+    def __init__(
+        self,
+        dimension: int,
+        freqs: int = 3,
+        atol: float = 1e-6,
+        rtol: float = 1e-5,
+        exact: bool = True,
+        hidden_features: tuple[int, ...] = (64, 64),
+        activation: type[nn.Module] = nn.SiLU, # pass the class, not an instance
+    ):
+        super().__init__()
+        self._ffj = FFJTransform(
+            features=dimension,
+            context=0,
+            freqs=freqs,
+            atol=atol,
+            rtol=rtol,
+            exact=exact,
+            hidden_features=hidden_features,
+            activation=activation,
+        )
+
+    def t(self) -> ComposedTransform:
+        """
+        Bijection on R^d as a zuko ComposedTransform.
+        Wraps the FFJ FreeFormJacobianTransform in a length-1
+        ComposedTransform so the Flow contract `t() -> ComposedTransform`
+        holds; .inv and .call_and_ladj delegate to the inner transform.
+        """
+        return ComposedTransform(self._ffj())
 
 # reverse KL divergence for energy-based normalizing flow
 def reverse_KL(x: torch.Tensor, target: Potential, flow: Flow):

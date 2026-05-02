@@ -2,6 +2,7 @@ import torch
 from zflows import Potential, Linear_Combination, langevin
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+torch.manual_seed(0)
 
 # U0(x) = (x1^2 + x2^2) / 2
 class U0(Potential):

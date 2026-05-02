@@ -122,7 +122,7 @@ Several end-to-end scripts are provided. Run from the project root:
 <details open>
 <summary><strong>1. Energy-based normalizing flow (reverse KL)</strong></summary>
 
-[`tests/2D_reverse_KL.py`](tests/2D_reverse_KL.py) trains an `NSF` on a target specified only by an unnormalized energy $U_1(x) = \tfrac{1}{2}|x|^2 + 2\cos x_1$, then evaluates residual mismatch via importance sampling and $\mathrm{ESS}$.
+[`tests/2D_reverse_KL.py`](tests/2D_reverse_KL.py) (writeup: [`tests/2D_reverse_KL.md`](tests/2D_reverse_KL.md)) trains an `NSF` on a target specified only by an unnormalized energy $U_1(x) = \tfrac{1}{2}|x|^2 + 2\cos x_1$, then evaluates residual mismatch via importance sampling and $\mathrm{ESS}$.
 
 ```bash
 python -m tests.2D_reverse_KL
@@ -135,7 +135,7 @@ python -m tests.2D_reverse_KL
 <details open>
 <summary><strong>2. Data-driven normalizing flow (forward KL)</strong></summary>
 
-[`tests/2D_forward_KL.py`](tests/2D_forward_KL.py) trains an `NSF` on samples from a 3-mode Gaussian mixture — only `u1.samples(N)` is ever called.
+[`tests/2D_forward_KL.py`](tests/2D_forward_KL.py) (writeup: [`tests/2D_forward_KL.md`](tests/2D_forward_KL.md)) trains an `NSF` on samples from a 3-mode Gaussian mixture — only `u1.samples(N)` is ever called.
 
 ```bash
 python -m tests.2D_forward_KL
@@ -148,7 +148,7 @@ python -m tests.2D_forward_KL
 <details open>
 <summary><strong>3. Periodic target with rejuvenation</strong></summary>
 
-[`tests/3D_periodic.py`](tests/3D_periodic.py) trains an `NCSF` on a von-Mises ridge mixture on the 3-torus $[-\pi, \pi]^3$, then runs the full pipeline: importance sampling → resample → `enable_grad` → Langevin rejuvenation.
+[`tests/3D_periodic.py`](tests/3D_periodic.py) (writeup: [`tests/3D_periodic.md`](tests/3D_periodic.md)) trains an `NCSF` on a von-Mises ridge mixture on the 3-torus $[-\pi, \pi]^3$, then runs the full pipeline: importance sampling → resample → `enable_grad` → Langevin rejuvenation.
 
 ```bash
 python -m tests.3D_periodic
@@ -161,7 +161,7 @@ python -m tests.3D_periodic
 <details open>
 <summary><strong>4. Annealed Boltzmann generator (4D, two repelling charges)</strong></summary>
 
-[`tests/4D_Boltzmann_generator.py`](tests/4D_Boltzmann_generator.py) trains an `NSF` on the 4D target of two charges in $\mathbb R^2$ confined to a soft annulus and repelling via a regularized 3D Coulomb. A direct flow proposal would have $\mathrm{ESS} \approx 0$, so we anneal: build $M{=}12$ bridge potentials $U_k = (1-c_k)U_0 + c_k U_1$ via `Linear_Combination`, and at each rung run *resample → reverse-KL train → IS → resample → MALA rejuvenation* with the same flow warm-started across rungs. The figure shows the marginal annulus forming (top row) and the joint relative-angle distribution $\Delta\theta = \theta_2 - \theta_1$ on $S^1$ shifting from uniform at $k=0$ to peaked at $\pm\pi$ at $k=12$ — the antipodal Coulomb minimum.
+[`tests/4D_Boltzmann_generator.py`](tests/4D_Boltzmann_generator.py) (writeup: [`tests/4D_Boltzmann_generator.md`](tests/4D_Boltzmann_generator.md)) trains an `NSF` on the 4D target of two charges in $\mathbb R^2$ confined to a soft annulus and repelling via a regularized 3D Coulomb. A direct flow proposal would have $\mathrm{ESS} \approx 0$, so we anneal: build $M{=}12$ bridge potentials $U_k = (1-c_k)U_0 + c_k U_1$ via `Linear_Combination`, and at each rung run *resample → reverse-KL train → IS → resample → MALA rejuvenation* with the same flow warm-started across rungs. The figure shows the marginal annulus forming (top row) and the joint relative-angle distribution $\Delta\theta = \theta_2 - \theta_1$ on $S^1$ shifting from uniform at $k=0$ to peaked at $\pm\pi$ at $k=12$ — the antipodal Coulomb minimum.
 
 ```bash
 python -m tests.4D_Boltzmann_generator

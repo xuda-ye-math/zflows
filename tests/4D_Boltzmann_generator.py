@@ -14,6 +14,7 @@ from zflows import (
 HERE = Path(__file__).resolve().parent
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+torch.manual_seed(0)
 
 # source: U_source(x) = (|r1|^2 + |r2|^2) / 2     (standard 4D Gaussian)
 u_source = Gaussian(mean=[0.0] * 4, variance=[1.0] * 4).to(device)
