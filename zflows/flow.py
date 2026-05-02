@@ -4,10 +4,11 @@ from functools import partial
 from typing import Protocol, runtime_checkable
 import torch
 from torch import Tensor, nn
-from zuko.flows import MAF
 from zuko.transforms import (
-    MonotonicRQSTransform, CircularShiftTransform, AffineTransform, ComposedTransform,
+    MonotonicRQSTransform, AffineTransform, ComposedTransform,
 )
+from zuko.flows import MAF
+from zuko.flows.spline import CircularRQSTransform
 from .potential import Potential
 
 """
@@ -162,14 +163,6 @@ class NSF(MAF):
             inner,
             AffineTransform(loc=self.center, scale=self.halfwidth),
         )
-
-def CircularRQSTransform(*phi: Tensor, slope: float = 1e-3) -> ComposedTransform:
-    r"""Creates a circular rational-quadratic spline (RQS) transformation."""
-
-    return ComposedTransform(
-        CircularShiftTransform(bound=torch.pi),
-        MonotonicRQSTransform(*phi, bound=torch.pi, slope=slope),
-    )
 
 class NCSF(MAF):
     """
