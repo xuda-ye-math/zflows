@@ -10,6 +10,12 @@ from zuko.transforms import (
 )
 from .potential import Potential
 
+"""
+All Flow classes assume context=0, i.e. the normalizing flow is always
+unconditioned. The motivating use case is energy-based sampling, where
+the target distribution is fixed and accuracy on that single target
+matters more than the extra expressibility of a context-conditioned flow.
+"""
 @runtime_checkable
 class Flow(Protocol):
     """
