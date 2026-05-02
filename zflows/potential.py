@@ -224,3 +224,45 @@ class Gaussian_Mixture(Potential):
         z = torch.randn(N, self.d, device=self.device)
         return self.mean[idx] + self.variance[idx].sqrt() * z
 
+class Linear_Combination(Potential):
+    """
+    Linear combination of two potentials:
+        U(x) = c0 * U0(x) + c1 * U1(x).
+    Useful for Boltzmann interpolations U_t = (1 - t) * U0 + t * U1, where
+    c0, c1 are typically swapped between integrator steps.
+
+    The two child potentials are stored by reference (auto-registered as
+    submodules), so .to(device), .parameters(), and .state_dict() recurse
+    through them. Mutating self.c0 / self.c1 in place takes effect on the
+    next forward call.
+    """
+    def __init__(
+        self,
+        U0: "Potential",
+        U1: "Potential",
+        c0: float,
+        c1: float | None = None,
+    ):
+        """
+        Input:
+            U0: Potential       first potential U0
+            U1: Potential       second potential U1
+            c0: float           coefficient of U0
+            c1: float | None    coefficient of U1; if None, defaults to 1 - c0,
+                                giving the convex interpolation
+                                U = c0 * U0 + (1 - c0) * U1.
+        """
+        super().__init__()
+        self.U0 = U0
+        self.U1 = U1
+        self.c0 = c0
+        self.c1 = 1.0 - c0 if c1 is None else c1
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Input:
+            x: Tensor [N, d]
+        Output:
+            U(x): Tensor [N]
+        """
+        return self.c0 * self.U0(x) + self.c1 * self.U1(x)
