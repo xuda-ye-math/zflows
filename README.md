@@ -1,3 +1,5 @@
+<p align="center"><img src="logo.png" alt="zflows logo" width="240px"></p>
+
 # zflows
 
 A small convenience wrapper around [zuko](https://github.com/probabilists/zuko) for normalizing flows, with first-class support for energy-based sampling.
