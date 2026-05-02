@@ -84,12 +84,26 @@ def resample(samples: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     idx = torch.multinomial(probs, N, replacement=True)
     return samples[idx]
 
-def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, iters: int = 100) -> torch.Tensor:
+def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, iters: int = 100, adjust: bool = False, chunk: int = 1) -> torch.Tensor:
     """
-    Overdamped Langevin dynamics targeting the distribution exp(-U(x)):
+    Langevin dynamics targeting the distribution exp(-U(x)).
 
-        x_{k+1} = x_k - step * grad U(x_k) + sqrt(2 * step) * xi_k,
-        xi_k ~ N(0, I_d).
+    Proposal (Euler-Maruyama on the overdamped Langevin SDE):
+        y = x - step * grad U(x) + sqrt(2 * step) * xi,   xi ~ N(0, I_d).
+
+    With adjust=False (default), every proposal is accepted; this is the
+    unadjusted Langevin algorithm (ULA), which has an O(step) bias but
+    needs only one gradient call per iteration. With adjust=True, each
+    proposal is accepted via Metropolis-Hastings, giving the standard MALA
+    scheme whose stationary distribution is *exactly* exp(-U) (unbiased)
+    at the cost of ~2x runtime (two gradient calls per iteration).
+
+    The MH acceptance probability is min(1, exp(log_alpha)) with
+        log_alpha = -U(y) + U(x) + log q(x|y) - log q(y|x),
+    where the proposal density is Gaussian:
+        log q(z|w) = -||z - w + step * grad U(w)||^2 / (4 * step) + const.
+    Both the energy difference *and* the asymmetric-proposal correction are
+    needed; using only the energy term leaves a residual O(step) bias.
 
     Requires `potential.enable_grad()` to have been called so that
     `potential.grad(x)` is available; otherwise raises RuntimeError.
@@ -99,6 +113,14 @@ def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, it
         potential: Potential       target potential U; must support .grad(x)
         step:      float           Euler-Maruyama step size
         iters:     int             number of Langevin steps
+        adjust:    bool            if True, run MALA (unbiased); if False, run ULA
+        chunk:     int             split `samples` along dim 0 into this many
+                                   chunks and run the trajectories sequentially.
+                                   Reduces peak GPU memory at the cost of wall
+                                   time. Statistically equivalent to chunk=1
+                                   (each chunk uses its own independent noise);
+                                   set higher only if you hit OOM on the
+                                   whole batch.
     Output:
         samples: Tensor [N, d]   particles after `iters` Langevin updates
     """
@@ -108,10 +130,24 @@ def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, it
             f"call {type(potential).__name__}.enable_grad() before passing it in."
         )
     noise_scale = (2.0 * step) ** 0.5
-    x = samples
-    for _ in range(iters):
-        x = x - step * potential.grad(x) + noise_scale * torch.randn_like(x)
-    return x
+    out = []
+    for x in torch.chunk(samples, chunk, dim=0):
+        for _ in range(iters):
+            gx = potential.grad(x)
+            y = x - step * gx + noise_scale * torch.randn_like(x)
+            if adjust:
+                # log q(z|w) = -||z - w + step * grad U(w)||^2 / (4 * step) + const
+                # Consume gx (-> log_q_yx) BEFORE calling potential.grad(y)
+                log_q_yx = -((y - x + step * gx) ** 2).sum(dim=-1) / (4.0 * step) # log q(y|x)
+                gy = potential.grad(y)
+                log_q_xy = -((x - y + step * gy) ** 2).sum(dim=-1) / (4.0 * step) # log q(x|y)
+                log_alpha = -potential(y) + potential(x) + log_q_xy - log_q_yx # [N]
+                accept = torch.rand_like(log_alpha).log() < log_alpha # [N] bool
+                x = torch.where(accept.unsqueeze(-1), y, x)
+            else:
+                x = y
+        out.append(x)
+    return torch.cat(out, dim=0)
 
 # alias: in SMC literature, Langevin steps are the standard "rejuvenation" move
 rejuvenation = langevin

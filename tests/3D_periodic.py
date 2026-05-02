@@ -33,13 +33,13 @@ u1 = U1(kappa=4.0).to(device)
 flow = NCSF(
     a=[-math.pi, -math.pi, -math.pi],
     b=[ math.pi,  math.pi,  math.pi],
-    bins=12, transforms=5, hidden_features=(64, 64),
+    bins=8, transforms=4, hidden_features=(128, 128),
 ).to(device)
 
 # training parameters
 N: int = 20000 # number of samples
 LR: float = 1e-3 # learning rate
-BATCH: int = 1000 # batch size
+BATCH: int = 2000 # batch size
 EPOCH: int = 20 # number of epochs
 
 x = u0.samples(N) # generate samples
@@ -89,7 +89,7 @@ os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "0")
 os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1") # cleaner logs
 
 u1.enable_grad() # opt-in: build .grad(x) only when needed
-y_fresh = rejuvenation(y_resampled, potential=u1) # default step / iters
+y_fresh = rejuvenation(y_resampled, potential=u1, adjust=True, chunk=4) # default step / iters
 
 # subsample for a less crowded 3D scatter
 N_PLOT = 10000
