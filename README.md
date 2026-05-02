@@ -155,3 +155,16 @@ python -m tests.3D_periodic
 <p align="center"><img src="tests/3D_periodic.png" alt="3D periodic test" width="400px"></p>
 
 </details>
+
+<details open>
+<summary><strong>4. Annealed Boltzmann generator (4D, two repelling charges)</strong></summary>
+
+[`tests/4D_Boltzmann_generator.py`](tests/4D_Boltzmann_generator.py) trains an `NSF` on the 4D target of two charges in $\mathbb R^2$ confined to a soft annulus and repelling via a regularized 3D Coulomb. A direct flow proposal would have $\mathrm{ESS} \approx 0$, so we anneal: build $M{=}12$ bridge potentials $U_k = (1-c_k)U_0 + c_k U_1$ via `Linear_Combination`, and at each rung run *resample → reverse-KL train → IS → resample → MALA rejuvenation* with the same flow warm-started across rungs. The figure shows the marginal annulus forming (top row) and the joint relative-angle distribution $\Delta\theta = \theta_2 - \theta_1$ on $S^1$ shifting from uniform at $k=0$ to peaked at $\pm\pi$ at $k=12$ — the antipodal Coulomb minimum.
+
+```bash
+python -m tests.4D_Boltzmann_generator
+```
+
+<p align="center"><img src="tests/4D_Boltzmann_generator.png" alt="4D Boltzmann generator" width="1000px"></p>
+
+</details>
