@@ -66,3 +66,7 @@ ax.set_title(r"Langevin samples of $U_{\mathrm{lc}} = c_0 U_0 + c_1 U_1$")
 plt.tight_layout()
 plt.savefig(HERE / "_linear_combination.png", dpi=300)
 plt.show()
+
+ulc.release()
+u0.release()
+u1.release()
