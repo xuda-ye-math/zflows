@@ -4,6 +4,7 @@
 
 # This bootstrap script
 git_init.sh
+run_all_tests.sh
 
 # Build / packaging artifacts
 *.egg-info/
