@@ -26,19 +26,32 @@ class Potential(nn.Module):
         """
         raise NotImplementedError
 
-    def enable_grad(self) -> "Potential":
+    def enable_grad(self, mode: str = "reduce-overhead") -> "Potential":
         """
         Compile a fast .grad(x) using torch.func.grad + torch.compile, vmapped
         over the batch dim. Returns self so the call can be chained, e.g.
             u = Gaussian(...).to(device).enable_grad()
         Idempotent: calling twice does not recompile.
+
+        Argument:
+            mode: passed through to torch.compile. The default
+                "reduce-overhead" captures a CUDA graph on the first .grad(x)
+                call, giving the fastest steady-state throughput for fixed-
+                shape inputs (e.g. uniform-batch Langevin loops), at the cost
+                of a few MB of static GPU buffers per captured shape. Advanced
+                users may prefer:
+                  - "default":     no CUDA graph; lower VRAM, ~10-30% slower.
+                                   Use when batch shape varies between calls
+                                   or when GPU memory is tight.
+                  - "max-autotune": longer first-call compilation in exchange
+                                   for additional kernel-level autotuning.
         """
         if self._grad_fn is not None:
             return self
         single = lambda x: self.forward(x.unsqueeze(0)).squeeze(0) # [d] -> scalar
         self._grad_fn = torch.compile(
             torch.func.vmap(torch.func.grad(single)),
-            mode="reduce-overhead",
+            mode=mode,
         )
         return self
 
