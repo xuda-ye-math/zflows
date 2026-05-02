@@ -22,10 +22,26 @@ class Flow(Protocol):
     Structural interface for any normalizing flow used by zflows.
 
     A Flow is anything that exposes a `t()` method returning a zuko-style
-    transform supporting `.inv` and `.call_and_ladj(x) -> (y, log|det J|)`.
+    ComposedTransform supporting `.inv` and `.call_and_ladj(x) -> (y, log|det J|)`.
     Built-in implementations are NSF and NCSF; future CNF / RealNVP / etc.
     classes need only provide `.t()` to be plug-compatible — no shared base
     class is required.
+
+    Canonical usage:
+
+        F = flow.t()                          # ComposedTransform
+        y, ladj = F.call_and_ladj(x)          # forward & log|det J|
+        x_back  = F.inv(y)                    # inverse
+
+    Note: this is intentionally *different* from zuko's native interface
+    `F = flow().transform`. zuko's pattern routes through the conditioner-
+    aware `flow(context)` call, which is the right entry point for
+    conditional flows but adds a vestigial pair of parens for unconditional
+    ones. zflows commits to unconditional flows (see the module-level note
+    above), so `flow.t()` is the only supported access path. Do NOT call
+    `flow().transform` directly in zflows code — wrap any new Flow
+    implementation behind a `t()` method instead, so user code stays
+    uniform and the Protocol contract holds.
     """
     def t(self) -> ComposedTransform: ...
 
