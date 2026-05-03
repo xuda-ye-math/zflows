@@ -23,7 +23,7 @@ def two_moons_samples(N: int, noise: float = 0.1) -> torch.Tensor:
     return y[torch.randperm(N, device=device)]
 
 # initialize Continuous Normalizing Flow (CNF / FFJORD)
-flow = CNF(dimension=2, freqs=5, hidden_features=(128, 128, 128)).to(device)
+flow = CNF(dimension=2, frequency=5, hidden_features=(128, 128, 128)).to(device)
 
 # training parameters
 N: int = 10000 # number of samples

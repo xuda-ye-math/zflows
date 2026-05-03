@@ -4,7 +4,7 @@ We train a Continuous Normalizing Flow (CNF / FFJORD) by forward-KL on samples f
 
 - **Source.** $\mu_0 = \mathcal N(0, I_2)$, the standard 2D Gaussian on $\mathbb R^2$. Unlike NSF, CNF lives on the full unbounded $\mathbb R^d$, so there is no rectangular box to specify.
 - **Target.** Two interleaving half-circles in $\mathbb R^2$, sampled by drawing $t \sim \mathrm{Uniform}[0, \pi]$ and emitting $(\cos t - 0.5, \sin t - 0.25)$ (upper moon) or $(0.5 - \cos t, 0.25 - \sin t)$ (lower moon), with $\mathcal N(0, 0.1^2 I)$ Gaussian noise added per coordinate. The two moons are point-symmetric through the origin and live in roughly $[-1.5, 1.5]^2$.
-- **Flow.** A `CNF` with `freqs=5` time-Fourier features and a `(128, 128, 128)` ODE-drift MLP; trained for 50 epochs of forward-KL with Adam at `lr=1e-2` and a cosine schedule to zero.
+- **Flow.** A `CNF` with `frequency=5` time-Fourier features and a `(128, 128, 128)` ODE-drift MLP; trained for 50 epochs of forward-KL with Adam at `lr=1e-2` and a cosine schedule to zero.
 
 ## Mathematical background
 

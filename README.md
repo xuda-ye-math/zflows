@@ -16,7 +16,7 @@ A small convenience wrapper around [zuko](https://github.com/probabilists/zuko) 
 ```python
 NSF(a, b, bins=8, slope=1e-3, transforms=4, hidden_features=(64, 64), activation=nn.SiLU)
 NCSF(a, b, bins=8, slope=1e-3, transforms=4, hidden_features=(64, 64), activation=nn.SiLU)
-CNF(dimension, freqs=3, atol=1e-6, rtol=1e-5, exact=True, hidden_features=(64, 64), activation=nn.SiLU)
+CNF(dimension, frequency=3, exact=True, hidden_features=(64, 64), activation=nn.SiLU)
 ```
 
 all subclassing the same `Flow` [abstract class](https://docs.python.org/3/library/abc.html) (`nn.Module` + `abc.ABC`):

@@ -28,7 +28,7 @@ from zflows import CNF, Flow
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 torch.manual_seed(0)
 
-cnf = CNF(dimension=2, freqs=3, hidden_features=(32, 32)).to(device)
+cnf = CNF(dimension=2, frequency=3, hidden_features=(32, 32)).to(device)
 
 # ----------------------------------------------------------------------
 # Test 1: structural — types and Flow-protocol membership

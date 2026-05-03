@@ -262,25 +262,28 @@ class CNF(Flow):
 
     Arguments:
         dimension: number of features d.
-        freqs: number of time-embedding frequencies in the ODE drift's
+        frequency: number of time-embedding frequencies in the ODE drift's
             input. The drift MLP sees the integration time t ∈ [0, 1]
-            through 2 * freqs extra features (cos(k*pi*t), sin(k*pi*t) for
-            k = 1, ..., freqs), letting it modulate the velocity field
-            smoothly along t. Larger freqs gives a richer time profile
-            (more flexibility, slightly larger first MLP layer); smaller
-            freqs forces a near-constant drift (faster, less expressive)
-            (recommend: 3-6).
-        atol: absolute tolerance of the adaptive ODE solver (dopri5 from
-            torchdiffeq under the hood). Each integration step is accepted
-            when its local error is below atol + rtol * |solution|;
-            smaller atol = tighter accuracy, more solver substeps, more
-            compute. Use a tighter atol if log|det J| disagrees noticeably
-            between forward and inverse calls (round-trip error)
-            (recommend: 1e-7 to 1e-5).
-        rtol: relative tolerance of the same solver, scaling with the
-            magnitude of the solution. Same speed/accuracy trade-off as
-            atol; in practice atol dominates near the origin and rtol
-            dominates for large |x| (recommend: 1e-6 to 1e-4).
+            through 2 * frequency extra features (cos(k*pi*t), sin(k*pi*t)
+            for k = 1, ..., frequency), letting it modulate the velocity
+            field smoothly along t. Larger frequency gives a richer time
+            profile (more flexibility, slightly larger first MLP layer);
+            smaller frequency forces a near-constant drift (faster, less
+            expressive) (recommend: 3-6).
+        absolute_tolerance: absolute tolerance of the adaptive ODE solver
+            (dopri5 from torchdiffeq under the hood). Each integration
+            step is accepted when its local error is below
+            absolute_tolerance + relative_tolerance * |solution|; smaller
+            absolute_tolerance = tighter accuracy, more solver substeps,
+            more compute. Use a tighter value if log|det J| disagrees
+            noticeably between forward and inverse calls (round-trip
+            error) (recommend: 1e-7 to 1e-5).
+        relative_tolerance: relative tolerance of the same solver, scaling
+            with the magnitude of the solution. Same speed/accuracy
+            trade-off as absolute_tolerance; in practice
+            absolute_tolerance dominates near the origin and
+            relative_tolerance dominates for large |x| (recommend: 1e-6
+            to 1e-4).
         exact: if True, evaluate log|det J| exactly via the augmented ODE
             (O(d) extra cost per step, deterministic gradients). If False,
             use the Hutchinson trace estimator (one extra ODE component,
@@ -295,9 +298,9 @@ class CNF(Flow):
     def __init__(
         self,
         dimension: int,
-        freqs: int = 3,
-        atol: float = 1e-6,
-        rtol: float = 1e-5,
+        frequency: int = 3,
+        absolute_tolerance: float = 1e-6,
+        relative_tolerance: float = 1e-5,
         exact: bool = True,
         hidden_features: tuple[int, ...] = (64, 64),
         activation: type[nn.Module] = nn.SiLU, # pass the class, not an instance
@@ -306,9 +309,9 @@ class CNF(Flow):
         self._ffj = FFJTransform(
             features=dimension,
             context=0,
-            freqs=freqs,
-            atol=atol,
-            rtol=rtol,
+            freqs=frequency,
+            atol=absolute_tolerance,
+            rtol=relative_tolerance,
             exact=exact,
             hidden_features=hidden_features,
             activation=activation,
