@@ -73,7 +73,7 @@ Pointers into the script:
 | Importance-sampling sweep | one closed-form pass over $N$ particles | one ODE integration per particle batch — **50–500× slower** |
 | MALA / Langevin rejuvenation | gradient autograds through MLPs | gradient routes through the adjoint ODE — costly |
 
-**Implication for energy-based sampling.** Because reverse-KL training, importance sampling, and MALA rejuvenation each require many forward / inverse / log-det evaluations per step, the *closed-form* nature of NSF makes it the right default for the *propose → reweight → resample → rejuvenate* pipeline that the other tests in this folder ([`2D_reverse_KL.md`](2D_reverse_KL.md), [`3D_periodic.md`](3D_periodic.md), [`4D_Boltzmann_generator.md`](4D_Boltzmann_generator.md)) all use. CNFs become competitive when
+**Implication for energy-based sampling.** Because reverse KL training, importance sampling, and MALA rejuvenation each require many forward / inverse / log-det evaluations per step, the *closed-form* nature of NSF makes it the right default for the *propose → reweight → resample → rejuvenate* pipeline that the other tests in this folder ([`2D_reverse_KL.md`](2D_reverse_KL.md), [`3D_periodic.md`](3D_periodic.md), [`4D_Boltzmann_generator.md`](4D_Boltzmann_generator.md)) all use. CNFs become competitive when
 
 1. the target's *topology* genuinely requires a smooth, non-axis-aligned deformation that splines fit only with many stacked transforms,
 2. the dimension is high enough that the autoregressive conditioner becomes the bottleneck (typically $d \gtrsim 50$),

@@ -11,24 +11,25 @@ A small convenience wrapper around [zuko](https://github.com/probabilists/zuko) 
 
 ## Features
 
-**Flexible flow classes and hyperparameters, one unified interface.** Three flow classes are supported — **NSF** (Neural Spline Flow), **NCSF** (Neural *Circular* Spline Flow, for periodic / angular features), and **CNF** (Continuous Normalizing Flow / FFJORD) — with the constructors
+**Flexible flow classes and hyperparameters, one unified interface.** Four flow classes are supported — **NSF** (Neural Spline Flow), **NCSF** (Neural *Circular* Spline Flow, for periodic / angular features), **CNF** (Continuous Normalizing Flow / FFJORD), and **RealNVP** (closed-form affine-coupling bijection on $\mathbb R^d$, Dinh et al. 2016) — with the constructors
 
 ```python
 NSF(a, b, bins=8, slope=1e-3, transforms=4, hidden_features=(64, 64), activation=nn.SiLU)
 NCSF(a, b, bins=8, slope=1e-3, transforms=4, hidden_features=(64, 64), activation=nn.SiLU)
 CNF(dimension, frequency=3, exact=True, hidden_features=(64, 64), activation=nn.SiLU)
+RealNVP(dimension, transforms=4, randmask=False, hidden_features=(64, 64), activation=nn.SiLU)
 ```
 
 all subclassing the same `Flow` [abstract class](https://docs.python.org/3/library/abc.html) (`nn.Module` + `abc.ABC`):
 
 ```python
-flow = NSF(...) # or NCSF(...) or CNF(...)
+flow = NSF(...) # or NCSF(...), CNF(...), RealNVP(...)
 F = flow.t() # bijection
 y, ladj = F.call_and_ladj(x) # forward & log|det J|
 x_back = F.inv(y) # inverse
 ```
 
-Swapping NSF for CNF is a one-line change. Per-class hyperparameters are documented in [`flow.py`](zflows/flow.py).
+Swapping one flow class for another is a one-line change. Per-class hyperparameters are documented in [`flow.py`](zflows/flow.py).
 
 **Precompiled gradients on `Potential`.** Any subclass of `Potential` opts into a `torch.compile`-compiled `vmap(grad(u))` with a single call:
 
@@ -139,7 +140,7 @@ Several end-to-end scripts are provided. Run from the project root:
 python -m tests.2D_reverse_KL
 ```
 
-<p align="center"><img src="tests/2D_reverse_KL.png" alt="reverse-KL test" width="600px"></p>
+<p align="center"><img src="tests/2D_reverse_KL.png" alt="reverse KL test" width="600px"></p>
 
 </details>
 
@@ -172,7 +173,7 @@ python -m tests.3D_periodic
 <details open>
 <summary><strong>4. Annealed Boltzmann generator (4D, two repelling charges)</strong></summary>
 
-[`tests/4D_Boltzmann_generator.py`](tests/4D_Boltzmann_generator.py) (writeup: [`tests/4D_Boltzmann_generator.md`](tests/4D_Boltzmann_generator.md)) trains an `NSF` on the 4D target of two charges in $\mathbb R^2$ confined to a soft annulus and repelling via a regularized 3D Coulomb. A direct flow proposal would have $\mathrm{ESS} \approx 0$, so we anneal: build $M{=}12$ bridge potentials $U_k = (1-c_k)U_0 + c_k U_1$ via `Linear_Combination`, and at each rung run *resample → reverse-KL train → IS → resample → MALA rejuvenation* with the same flow warm-started across rungs. The figure shows the marginal annulus forming (top row) and the joint relative-angle distribution $\Delta\theta = \theta_2 - \theta_1$ on $S^1$ shifting from uniform at $k=0$ to peaked at $\pm\pi$ at $k=12$ — the antipodal Coulomb minimum.
+[`tests/4D_Boltzmann_generator.py`](tests/4D_Boltzmann_generator.py) (writeup: [`tests/4D_Boltzmann_generator.md`](tests/4D_Boltzmann_generator.md)) trains an `NSF` on the 4D target of two charges in $\mathbb R^2$ confined to a soft annulus and repelling via a regularized 3D Coulomb. A direct flow proposal would have $\mathrm{ESS} \approx 0$, so we anneal: build $M{=}12$ bridge potentials $U_k = (1-c_k)U_0 + c_k U_1$ via `Linear_Combination`, and at each rung run *resample → reverse KL train → IS → resample → MALA rejuvenation* with the same flow warm-started across rungs. The figure shows the marginal annulus forming (top row) and the joint relative-angle distribution $\Delta\theta = \theta_2 - \theta_1$ on $S^1$ shifting from uniform at $k=0$ to peaked at $\pm\pi$ at $k=12$ — the antipodal Coulomb minimum.
 
 ```bash
 python -m tests.4D_Boltzmann_generator

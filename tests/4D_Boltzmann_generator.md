@@ -9,7 +9,7 @@ U_1(x_1, x_2) \;=\; a\bigl[\,(|x_1|^2 - r_0^2)^2 + (|x_2|^2 - r_0^2)^2\,\bigr] \
 $$
 with $a=1$, $q^2=4$, $r_0=2$, $\varepsilon=10^{-3}$. The regularization keeps gradients finite at $x_1 = x_2$ while letting the target behave like a true Coulomb away from collisions.
 - **Symmetries.** $U_1$ is invariant under (i) rigid 2D rotations of $(x_1, x_2)$ and (ii) particle exchange $(x_1, x_2) \leftrightarrow (x_2, x_1)$. The flow has to learn both from data, since `NSF` on Cartesian $[a,b]^4$ has neither built in.
-- **Why anneal.** Training reverse-KL directly from $\mu_0$ to $\mu_1$ is an out-of-distribution problem at initialization (the Gaussian and the repulsive ring barely overlap), so importance weights collapse and the flow gets stuck. The annealing schedule $U_k = (1 - c_k) U_0 + c_k U_1$ with $c_k = k/M$ keeps each consecutive pair $(\mu_{k-1}, \mu_k)$ close enough that incremental training works.
+- **Why anneal.** Training reverse KL directly from $\mu_0$ to $\mu_1$ is an out-of-distribution problem at initialization (the Gaussian and the repulsive ring barely overlap), so importance weights collapse and the flow gets stuck. The annealing schedule $U_k = (1 - c_k) U_0 + c_k U_1$ with $c_k = k/M$ keeps each consecutive pair $(\mu_{k-1}, \mu_k)$ close enough that incremental training works.
 
 ## Mathematical background
 
@@ -24,7 +24,7 @@ $$
 with $\mu_k \propto \exp(-U_k)$. Each rung's training step does five things, in order:
 
 1. **Resample.** Draw a working set $x_{\mathrm{train}, k-1}$ of size $N_{\mathrm{train}}$ uniformly with replacement from the previous rung's particle cloud $x_{\mathrm{valid}, k-1} \sim \mu_{k-1}$.
-2. **Train.** Update the *single* shared flow $F$ to minimize reverse-KL from $\mu_{k-1}$ to $\mu_k$, treating $x_{\mathrm{train}, k-1}$ as samples from the source. The $U_{k-1}(x)$ term is parameter-independent and drops out of the gradient, so `reverse_KL(x, target=U_k, flow=F)` is the correct loss as-is.
+2. **Train.** Update the *single* shared flow $F$ to minimize reverse KL from $\mu_{k-1}$ to $\mu_k$, treating $x_{\mathrm{train}, k-1}$ as samples from the source. The $U_{k-1}(x)$ term is parameter-independent and drops out of the gradient, so `reverse_KL(x, target=U_k, flow=F)` is the correct loss as-is.
 3. **Importance sample.** Push the full validation set $x_{\mathrm{valid}, k-1}$ through $F$ to get proposals $y$ and log-weights $\log w = -U_k(y) + U_{k-1}(x_{\mathrm{valid}, k-1}) + \log|\det J_F|$. Report the ESS as a self-test for this rung.
 4. **Resample by weight.** Multinomial draw to convert the weighted cloud into an equally-weighted cloud $\tilde y$.
 5. **Rejuvenate.** Run MALA (Metropolis-adjusted Langevin) against $U_k$ to break duplicate particles and remove residual proposal bias. Output $x_{\mathrm{valid}, k}$ for the next rung.

@@ -16,7 +16,7 @@ Both `Potential` subclasses return $U(x)$ for a batch of points $x \in [-\pi, \p
 $$
 \mu_0(x) \propto \exp(-U_0(x)), \qquad \mu_1(\theta) \propto \exp(-U_1(\theta)).
 $$
-As always with reverse-KL training, only $U_1$ is needed — never the normalizing constant of $\mu_1$.
+As always with reverse KL training, only $U_1$ is needed — never the normalizing constant of $\mu_1$.
 
 ### NCSF and reverse-$\mathrm{KL}$ training
 
@@ -83,7 +83,7 @@ Pointers into the script:
 - source (uniform on the 3-torus) and target ($U_1$ ridge mixture): [`3D_periodic.py:13–31`](3D_periodic.py#L13-L31)
 - NCSF init: [`3D_periodic.py:34–38`](3D_periodic.py#L34-L38)
 - training parameters: [`3D_periodic.py:40–44`](3D_periodic.py#L40-L44)
-- training loop (mini-batched reverse-KL): [`3D_periodic.py:46–67`](3D_periodic.py#L46-L67)
+- training loop (mini-batched reverse KL): [`3D_periodic.py:46–67`](3D_periodic.py#L46-L67)
 - IS reweighting + $\mathrm{ESS}$: [`3D_periodic.py:70–81`](3D_periodic.py#L70-L81)
 - resample weighted cloud → equal-weight cloud: [`3D_periodic.py:83–86`](3D_periodic.py#L83-L86)
 - `enable_grad` + Langevin rejuvenation: [`3D_periodic.py:88–93`](3D_periodic.py#L88-L93)
@@ -93,7 +93,7 @@ Pointers into the script:
 
 ## Recap of the pipeline
 
-1. **Train.** Reverse-KL fits an NCSF proposal $\nu = F_\# \mu_0$ to the target $\mu_1 \propto \exp(-U_1)$, using only $U_1$ (no target samples).
+1. **Train.** Reverse KL fits an NCSF proposal $\nu = F_\# \mu_0$ to the target $\mu_1 \propto \exp(-U_1)$, using only $U_1$ (no target samples).
 2. **Importance sampling.** Push $\mu_0$-samples through $F$, compute log-weights $\log w = -U_1(F(x)) + U_0(x) + \log|\det J_F|$, report $\mathrm{ESS}$ as a self-test.
 3. **Resample.** Multinomial resampling $\{\theta_i, w_i\} \to \{\theta_{j_i}\}$ converts a weighted cloud into an equally-weighted cloud (with duplicate particles).
 4. **Enable gradients.** `u1.enable_grad()` builds a `torch.compile`-compiled `vmap(grad(U_1))` once and caches it on the instance.

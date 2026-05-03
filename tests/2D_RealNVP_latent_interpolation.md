@@ -10,7 +10,7 @@ The point is not that RealNVP is the best density estimator on this target — `
 
 ## Mathematical background
 
-Forward-KL training is identical to every other data-driven test in this folder. With $F = \mathrm{flow}.t()$ the bijection on $\mathbb R^2$,
+Forward KL training is identical to every other data-driven test in this folder. With $F = \mathrm{flow}.t()$ the bijection on $\mathbb R^2$,
 
 $$
 \mathcal L_{\mathrm{forward}}[F] = \mathbb E_{y \sim \mu_1}\bigl[\, U_0(F^{-1}(y)) + \log |\det J_F(F^{-1}(y))| \,\bigr].
