@@ -10,27 +10,37 @@ A small convenience wrapper around [zuko](https://github.com/probabilists/zuko) 
 
 ## Features
 
-**Flexible flow interfaces with documented hyperparameters.** Both `NSF` (Neural Spline Flow) and `NCSF` (Neural *Circular* Spline Flow, for periodic / angular features) expose a uniform constructor:
+**Flexible flow classes and hyperparameters, one unified interface.** Three flow classes are supported — **NSF** (Neural Spline Flow), **NCSF** (Neural *Circular* Spline Flow, for periodic / angular features), and **CNF** (Continuous Normalizing Flow / FFJORD) — with the constructors
 
 ```python
 NSF(a, b, bins=8, slope=1e-3, transforms=4, hidden_features=(64, 64), activation=nn.SiLU)
 NCSF(a, b, bins=8, slope=1e-3, transforms=4, hidden_features=(64, 64), activation=nn.SiLU)
+CNF(dimension, freqs=3, atol=1e-6, rtol=1e-5, exact=True, hidden_features=(64, 64), activation=nn.SiLU)
 ```
 
-The user specifies the rectangular region `[a, b]` (any list / `Tensor`), the spline resolution and slope floor, the conditioner MLP width / depth, and the activation **class** (not instance). Every parameter has a docstring entry with a concrete recommended range and the failure mode it controls — see [`flow.py`](zflows/flow.py). NCSF treats each coordinate as periodic on its box and is the right choice for angles, phases, or any feature on a torus.
-
-**Precompiled gradients on `Potential`.** Any subclass of `Potential` opts into a `torch.compile`-compiled `vmap(grad(U))` with a single call:
+all subclassing the same `Flow` [abstract class](https://docs.python.org/3/library/abc.html) (`nn.Module` + `abc.ABC`):
 
 ```python
-u1 = U1().to(device).enable_grad()
-g = u1.grad(theta) # [N, d], no .requires_grad_ on theta needed
+flow = NSF(...) # or NCSF(...) or CNF(...)
+F = flow.t() # bijection
+y, ladj = F.call_and_ladj(x) # forward & log|det J|
+x_back = F.inv(y) # inverse
+```
+
+Swapping NSF for CNF is a one-line change. Per-class hyperparameters are documented in [`flow.py`](zflows/flow.py).
+
+**Precompiled gradients on `Potential`.** Any subclass of `Potential` opts into a `torch.compile`-compiled `vmap(grad(u))` with a single call:
+
+```python
+u = Potential_U().to(device).enable_grad()
+g = u.grad(x) # x: [N, d] -> g: [N, d]
 ```
 
 The gradient closure is built once, cached on the instance, and reused every call — making heavy-load Langevin / MALA sampling fast (one fused kernel per step instead of an autograd graph rebuild). The call is idempotent and chainable; calling `.grad()` without `.enable_grad()` raises a clear `RuntimeError`.
 
 **One-line KL losses.** `reverse_KL(x, target, flow)` and `forward_KL(y, source, flow)` are direct-call functions returning a scalar loss — drop them straight into a training loop, no boilerplate.
 
-**SMC-style utilities.** `resample(samples, weights)` for multinomial resampling; `langevin(samples, potential, step, iters)` (alias `rejuvenation`) for overdamped Langevin updates; `compute_ESS`, `compute_ESS_log`, `compute_CESS`, `compute_CESS_log` for importance-sampling diagnostics, with log-space variants using `logsumexp` for numerical stability.
+**SMC-style utilities.** `resample(samples, weights)` for multinomial resampling; `langevin(samples, potential, step, iters, adjust=False, chunk=1)` (alias `rejuvenation`) for overdamped Langevin updates, with `adjust=True` switching from plain ULA to MALA (Metropolis-adjusted Langevin) and `chunk` bounding peak VRAM by splitting the batch; `compute_ESS`, `compute_ESS_log`, `compute_CESS`, `compute_CESS_log` for importance-sampling diagnostics, with log-space variants using `logsumexp` for numerical stability.
 
 Together these compose into a complete *propose → reweight → resample → rejuvenate* pipeline with no glue code on the user side.
 
