@@ -4,7 +4,7 @@
 
 A small convenience wrapper around [zuko](https://github.com/probabilists/zuko) for normalizing flows, with first-class support for energy-based sampling.
 
-> **Status: experimental.** This project has only been tested on **Linux + NVIDIA GPU**. Some features (notably `Potential.enable_grad`, which relies on `torch.compile`) are **not supported on Windows** — see e.g. [pytorch/pytorch#167062](https://github.com/pytorch/pytorch/issues/167062). On Windows you can still use `NSF` / `NCSF` / `reverse_KL` / `forward_KL` / `resample`, but skip `enable_grad` and the Langevin `rejuvenation` step.
+> **Status: experimental.** Tested only on **Linux + NVIDIA GPU**. On Windows, please use [WSL](https://github.com/microsoft/WSL) or avoid `Potential.enable_grad` — `torch.compile` is not supported there (see [pytorch/pytorch#167062](https://github.com/pytorch/pytorch/issues/167062)).
 >
 > This project was developed with [Claude Code](https://claude.com/claude-code).
 
@@ -168,5 +168,18 @@ python -m tests.4D_Boltzmann_generator
 ```
 
 <p align="center"><img src="tests/4D_Boltzmann_generator.png" alt="4D Boltzmann generator" width="1000px"></p>
+
+</details>
+
+<details open>
+<summary><strong>5. Continuous normalizing flow on two moons (CNF / FFJORD)</strong></summary>
+
+[`tests/2D_two_moon_CNF.py`](tests/2D_two_moon_CNF.py) (writeup: [`tests/2D_two_moon_CNF.md`](tests/2D_two_moon_CNF.md)) trains a `CNF` (FFJORD-style continuous normalizing flow) by forward-KL on samples from the classic two-moons distribution — a target whose interlocking-arc topology cannot be separated along any axis. The point of this test is to (i) exercise the `CNF` class on a target where its smooth, non-axis-aligned deformation actually pays off, and (ii) make the CNF/NSF trade-off concrete: closed-form O(d) splines vs. an adaptive ODE flow that buys topological flexibility at the cost of 50–500× slower importance sampling. The writeup includes a side-by-side comparison of the two flow classes across the operations a typical energy-based pipeline performs.
+
+```bash
+python -m tests.2D_two_moon_CNF
+```
+
+<p align="center"><img src="tests/2D_two_moon_CNF.png" alt="2D two-moons CNF test" width="700px"></p>
 
 </details>

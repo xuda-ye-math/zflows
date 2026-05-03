@@ -262,12 +262,35 @@ class CNF(Flow):
 
     Arguments:
         dimension: number of features d.
-        freqs: number of time-embedding frequencies for the ODE drift.
-        atol, rtol: ODE-solver tolerances; smaller = more accurate, slower
-            (recommend: keep defaults unless training diverges).
-        exact: True for exact log|det J|, False for Hutchinson estimate.
-        hidden_features: ODE-MLP layer widths.
-        activation: ODE-MLP activation class (not instance).
+        freqs: number of time-embedding frequencies in the ODE drift's
+            input. The drift MLP sees the integration time t ∈ [0, 1]
+            through 2 * freqs extra features (cos(k*pi*t), sin(k*pi*t) for
+            k = 1, ..., freqs), letting it modulate the velocity field
+            smoothly along t. Larger freqs gives a richer time profile
+            (more flexibility, slightly larger first MLP layer); smaller
+            freqs forces a near-constant drift (faster, less expressive)
+            (recommend: 3-6).
+        atol: absolute tolerance of the adaptive ODE solver (dopri5 from
+            torchdiffeq under the hood). Each integration step is accepted
+            when its local error is below atol + rtol * |solution|;
+            smaller atol = tighter accuracy, more solver substeps, more
+            compute. Use a tighter atol if log|det J| disagrees noticeably
+            between forward and inverse calls (round-trip error)
+            (recommend: 1e-7 to 1e-5).
+        rtol: relative tolerance of the same solver, scaling with the
+            magnitude of the solution. Same speed/accuracy trade-off as
+            atol; in practice atol dominates near the origin and rtol
+            dominates for large |x| (recommend: 1e-6 to 1e-4).
+        exact: if True, evaluate log|det J| exactly via the augmented ODE
+            (O(d) extra cost per step, deterministic gradients). If False,
+            use the Hutchinson trace estimator (one extra ODE component,
+            unbiased but stochastic gradients) — faster for large d but
+            adds Monte-Carlo noise to training.
+        hidden_features: ODE-MLP layer widths (recommend: (64, 64) or
+            (128, 64, 128); widen before deepening).
+        activation: ODE-MLP activation class, not instance (recommend:
+            nn.SiLU or nn.GELU for smooth drifts; nn.ELU is the zuko
+            default and works well too).
     """
     def __init__(
         self,
