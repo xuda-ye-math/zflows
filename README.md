@@ -33,7 +33,7 @@ Swapping NSF for CNF is a one-line change. Per-class hyperparameters are documen
 
 ```python
 u = Potential_U().to(device).enable_grad()
-g = u.grad(x) # x: [N, d] -> g: [N, d]
+g = u.grad(x) # x: [N, d] -> g: [N, d], no requires_grad_ on x needed
 ```
 
 The gradient closure is built once, cached on the instance, and reused every call — making heavy-load Langevin / MALA sampling fast (one fused kernel per step instead of an autograd graph rebuild). The call is idempotent and chainable; calling `.grad()` without `.enable_grad()` raises a clear `RuntimeError`.
