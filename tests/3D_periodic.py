@@ -89,6 +89,7 @@ import os
 os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "0")
 os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1") # cleaner logs
 
+u1.enable_eval() # for faster MALA
 u1.enable_grad() # opt-in: build .grad(x) only when needed
 y_fresh = rejuvenation(y_resampled, potential=u1, adjust=True, chunk=4) # default step / iters
 

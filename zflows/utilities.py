@@ -107,6 +107,10 @@ def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, it
 
     Requires `potential.enable_grad()` to have been called so that
     `potential.grad(x)` is available; otherwise raises RuntimeError.
+    For the MALA branch (`adjust=True`), if `potential.enable_eval()` has
+    also been called, the U(y) / U(x) energy evaluations route through
+    the compiled `potential.eval(x)` fast path; otherwise they fall back
+    to the regular `potential(x)` call.
 
     Input:
         samples:   Tensor [N, d]   initial particles
@@ -129,6 +133,9 @@ def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, it
             f"langevin() requires gradients on the potential; "
             f"call {type(potential).__name__}.enable_grad() before passing it in."
         )
+    # MALA accept/reject needs U(x), U(y); use the compiled fast path if
+    # the user has opted in via .enable_eval(), else fall back to __call__.
+    U = potential.eval if potential._eval_fn is not None else potential
     noise_scale = (2.0 * step) ** 0.5
     out = []
     for x in torch.chunk(samples, chunk, dim=0):
@@ -141,7 +148,7 @@ def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, it
                 log_q_yx = -((y - x + step * gx) ** 2).sum(dim=-1) / (4.0 * step) # log q(y|x)
                 gy = potential.grad(y)
                 log_q_xy = -((x - y + step * gy) ** 2).sum(dim=-1) / (4.0 * step) # log q(x|y)
-                log_alpha = -potential(y) + potential(x) + log_q_xy - log_q_yx # [N]
+                log_alpha = -U(y) + U(x) + log_q_xy - log_q_yx # [N]
                 accept = torch.rand_like(log_alpha).log() < log_alpha # [N] bool
                 x = torch.where(accept.unsqueeze(-1), y, x)
             else:

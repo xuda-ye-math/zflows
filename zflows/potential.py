@@ -1,4 +1,4 @@
-# pyright: reportOperatorIssue=false, reportArgumentType=false, reportIndexIssue=false, reportCallIssue=false, reportReturnType=false
+# pyright: reportOperatorIssue=false, reportArgumentType=false, reportIndexIssue=false, reportCallIssue=false, reportReturnType=false, reportIncompatibleMethodOverride=false
 
 import torch
 from torch import nn
@@ -7,15 +7,30 @@ class Potential(nn.Module):
     """
     Generic Potential class. forward() computes the potential function.
 
-    By default, calling .grad(x) raises. Opt in with .enable_grad():
+    Two opt-in fast paths are exposed, both built once via torch.compile
+    and cached on the instance:
 
-        u = U1().to(device).enable_grad()
+      .enable_grad() -> .grad(x)    fast batched dU/dx via vmap(grad(.))
+      .enable_eval() -> .eval(x)    fast batched U(x) via compile(forward)
+
+    Calling .grad(x) before .enable_grad(), or .eval(x) before
+    .enable_eval(), raises RuntimeError. The .eval() entry point preserves
+    the standard nn.Module eval-mode switch when called with no argument:
+
+        u = U1().to(device).enable_grad().enable_eval()
         g = u.grad(x)   # [N, d], no requires_grad on x
+        v = u.eval(x)   # [N], faster than u(x) in MALA accept/reject loops
+        u.eval()        # nn.Module: switch to eval mode (no x)
 
-    The gradient is built once via torch.func.grad + torch.compile, batched
-    over the leading dim with vmap, and cached on the instance.
+    The .eval(x) path is intended for inference-time hot loops (MALA
+    accept/reject, importance sampling) where a torch.compile-fused U(x)
+    avoids per-call autograd-graph construction. Do NOT call .eval(x) on
+    a Potential whose value will be backpropagated through during
+    training -- compile mode "reduce-overhead" captures static-shape
+    CUDA graphs that are not differentiable in the normal sense.
     """
     _grad_fn = None # populated by enable_grad()
+    _eval_fn = None # populated by enable_eval()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -69,11 +84,60 @@ class Potential(nn.Module):
             )
         return self._grad_fn(x)
 
+    def enable_eval(self, mode: str = "reduce-overhead") -> "Potential":
+        """
+        Compile a fast .eval(x) path via torch.compile of self.forward,
+        intended for hot inference loops (e.g. MALA accept/reject and
+        importance-sampling reweighting). Returns self so the call can
+        be chained, e.g.
+            u = Gaussian(...).to(device).enable_eval()
+        Idempotent: calling twice does not recompile.
+
+        Argument:
+            mode: passed through to torch.compile. The default
+                "reduce-overhead" captures a CUDA graph on the first
+                .eval(x) call, giving the fastest steady-state throughput
+                for fixed-shape inputs (uniform-batch MALA loops), at the
+                cost of a few MB of static GPU buffers per captured shape.
+                See .enable_grad for the "default" / "max-autotune"
+                alternatives -- same semantics here.
+
+        Note: this is a forward-only fast path; do not use the result of
+        .eval(x) inside a training loss that you back-propagate through.
+        Use the regular u(x) call for that.
+        """
+        if self._eval_fn is not None:
+            return self
+        self._eval_fn = torch.compile(self.forward, mode=mode)
+        return self
+
+    def eval(self, x: torch.Tensor | None = None):
+        """
+        Dual-purpose, dispatched on the argument:
+
+          - .eval()      no argument -> standard nn.Module behaviour:
+                         switch to eval mode, return self.
+          - .eval(x)     evaluate U(x) via the compiled fast path. Raises
+                         RuntimeError if .enable_eval() has not been called.
+
+        Input (when x is provided):
+            x: Tensor [N, d]
+        Output (when x is provided):
+            U(x): Tensor [N]
+        """
+        if x is None:
+            return super().eval()
+        if self._eval_fn is None:
+            raise RuntimeError(
+                f"{type(self).__name__}.eval(x) requires .enable_eval() first."
+            )
+        return self._eval_fn(x)
+
     def release(self) -> None:
         """
-        Drop this instance's compiled .grad closure, submodules, parameters,
-        and buffers, then return cached GPU blocks to the CUDA driver via
-        torch.cuda.empty_cache().
+        Drop this instance's compiled .grad / .eval closures, submodules,
+        parameters, and buffers, then return cached GPU blocks to the CUDA
+        driver via torch.cuda.empty_cache().
 
         This is *redundant* in normal use: when a Potential goes out of scope
         Python's refcount + garbage collector reclaim its memory automatically.
@@ -86,7 +150,7 @@ class Potential(nn.Module):
           - Instance-scoped: only this Potential's state is cleared. Child
             Potentials referenced elsewhere (e.g. the U0 / U1 of a
             Linear_Combination still bound to local variables) survive and
-            keep their own ._grad_fn.
+            keep their own ._grad_fn / ._eval_fn.
           - Process-global side effect: torch.cuda.empty_cache() flushes
             free blocks across all CUDA devices for the whole process. It
             does not invalidate any other instance's compiled artifacts; the
@@ -94,6 +158,7 @@ class Potential(nn.Module):
         """
         import gc
         self._grad_fn = None
+        self._eval_fn = None
         self._modules.clear()
         self._parameters.clear()
         self._buffers.clear()
