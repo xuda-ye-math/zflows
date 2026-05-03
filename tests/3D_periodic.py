@@ -3,7 +3,8 @@
 from pathlib import Path
 import math
 import torch
-from zflows import NCSF, Potential, Uniform, compute_ESS_log, reverse_KL, resample, rejuvenation
+from zflows import (NCSF, Potential, Uniform, reverse_KL, resample,
+        compute_ESS_log, rejuvenation, importance_weights_log, )
 
 HERE = Path(__file__).resolve().parent
 
@@ -71,11 +72,8 @@ import matplotlib.pyplot as plt
 
 with torch.no_grad():
     x_plot = u0.samples(N) # fresh samples from source
-    y_plot, ladj = flow.t().call_and_ladj(x_plot) # pushforward F(x)
-
-    # importance sampling: target density ~ exp(-u1(y)), proposal density q(y).
-    # log q(y) = -u0(x) - ladj, so log w = -u1(y) + u0(x) + ladj.
-    log_w = -u1(y_plot) + u0(x_plot) + ladj
+    y_plot, _ = flow.t().call_and_ladj(x_plot) # pushforward F(x), used for resampling
+    log_w = importance_weights_log(x_plot, source=u0, target=u1, flow=flow)
 
 ess = compute_ESS_log(log_w)
 print(f"ESS = {ess.item():.4f}")

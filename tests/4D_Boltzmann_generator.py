@@ -7,8 +7,8 @@ os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1") # cleaner logs
 
 import torch
 from zflows import (
-    Potential, Gaussian, NSF, Linear_Combination,
-    reverse_KL, compute_ESS_log, resample, rejuvenation,
+    Potential, Gaussian, NSF, Linear_Combination, reverse_KL,
+    compute_ESS_log, resample, rejuvenation, importance_weights_log,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -117,9 +117,8 @@ else:
 
         # (3) push validation samples through the trained flow, IS-correct, resample
         with torch.no_grad():
-            y_pf, ladj = flow.t().call_and_ladj(x_valid_prev) # F(x_valid_prev), log|det J|
-            # log w = -U_k(y) + U_{k-1}(x) + log|det J_F(x)|
-            log_w = -U_curr(y_pf) + U_prev(x_valid_prev) + ladj
+            y_pf, _ = flow.t().call_and_ladj(x_valid_prev) # F(x_valid_prev) for resampling
+            log_w = importance_weights_log(x_valid_prev, source=U_prev, target=U_curr, flow=flow)
             ess = compute_ESS_log(log_w)
             print(f"  ESS = {ess.item():.4f}")
             ess_history.append(ess.item())
@@ -127,7 +126,8 @@ else:
             y_resampled = resample(y_pf, w)
 
         # (4) rejuvenate against U_curr to break duplicates and decorrelate
-        U_curr.enable_grad()
+        U_curr.enable_grad() # opt-in: compiled vmap(grad(forward)) for ULA / MALA proposal
+        U_curr.enable_eval() # opt-in: compiled forward, used by MALA accept/reject
         x_valid_curr = rejuvenation(y_resampled, potential=U_curr, adjust=True, chunk=4)
 
         # (5) only x_valid_curr is carried into the next step;

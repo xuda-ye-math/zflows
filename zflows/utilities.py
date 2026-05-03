@@ -1,5 +1,8 @@
+# pyright: reportOperatorIssue=false
+
 import torch
 from .potential import Potential
+from .flow import Flow
 
 def compute_ESS(weights: torch.Tensor) -> torch.Tensor:
     """
@@ -69,6 +72,68 @@ def compute_CESS_log(source_weights: torch.Tensor, log_importance_weights: torch
     log_w1 = log_s + log_importance_weights
     log_w2 = log_s + 2 * log_importance_weights
     return (2 * torch.logsumexp(log_w1, dim=0) - torch.logsumexp(log_w2, dim=0)).exp()
+
+def importance_weights(samples: torch.Tensor, source: Potential, target: Potential, flow: Flow) -> torch.Tensor:
+    """
+    Linear-space self-normalized importance weights for the proposal
+    `nu = F_# source` against the target `mu_1 ~ exp(-target)`. Thin
+    convenience wrapper around `importance_weights_log`: subtract the
+    max log-weight for numerical stability, then exponentiate.
+
+        w_i = exp(log_w_i - max_j log_w_j),   w in [0, 1].
+
+    The omitted factor `exp(max log_w)` is a sample-dependent scalar
+    that cancels in every *self-normalized* downstream use (ratios in
+    compute_ESS, draws from compute_ESS_log / resample, MC averages of
+    bounded test functions). Use this routine when the consumer expects
+    plain non-negative weights (e.g. `resample(samples, weights)`); use
+    `importance_weights_log` + `compute_ESS_log` / `compute_CESS_log`
+    when log-space stability is required (very-low-overlap proposals,
+    tail diagnostics).
+
+    Input:
+        samples: Tensor [N, d]   particles drawn from `source`
+        source:  Potential       source (proposal-base) potential U_0
+        target:  Potential       target potential U_1
+        flow:    Flow            normalizing flow providing F = flow.t()
+    Output:
+        w: Tensor [N]   unnormalized importance weights in [0, 1].
+    """
+    log_w = importance_weights_log(samples, source, target, flow)
+    return (log_w - log_w.max()).exp()
+
+def importance_weights_log(samples: torch.Tensor, source: Potential, target: Potential, flow: Flow) -> torch.Tensor:
+    """
+    Self-normalized importance-sampling log-weights for the proposal
+    `nu = F_# source` against the target `mu_1 ~ exp(-target)`, where
+    `F = flow.t()` is the trained bijection that pushes source samples
+    toward the target.
+
+    For x ~ source, y = F(x), the proposal density is
+        log nu(y) = log source(x) - log|det J_F(x)|.
+    The unnormalized log-importance-weight is therefore
+        log w(y) = log mu_1(y) - log nu(y)
+                 = -target(y) + source(x) + log|det J_F(x)|,
+    using `Potential` energies U = -log mu (up to additive constants
+    that cancel after self-normalization).
+
+    Use the regular forward call (`source(x)`, `target(y)`); no
+    `enable_eval()` opt-in is needed here since this routine is not on
+    the per-iter MALA hot path.
+
+    Input:
+        samples: Tensor [N, d]   particles drawn from `source`
+        source:  Potential       source (proposal-base) potential U_0
+        target:  Potential       target potential U_1
+        flow:    Flow            normalizing flow providing F = flow.t()
+    Output:
+        log_w: Tensor [N]   unnormalized log importance weights, ready
+                            to feed into compute_ESS_log / compute_CESS_log
+                            or to exponentiate (after subtracting max).
+    """
+    x = samples
+    y, ladj = flow.t().call_and_ladj(x)
+    return -target(y) + source(x) + ladj
 
 def resample(samples: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     """
