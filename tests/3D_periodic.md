@@ -32,7 +32,7 @@ With the trained flow as proposal $\nu = F_\# \mu_0$, the unnormalized log-weigh
 $$
 \log w(\theta) = -U_1(\theta) + U_0(x) + \log |\det J_F(x)|, \qquad \theta = F(x), \; x \sim \mu_0,
 $$
-and the Effective Sample Size $\mathrm{ESS} = (\sum w_i)^2 / (N \sum w_i^2) \in [0, 1]$ tells us how concentrated those weights are.
+and the Effective Sample Size $\mathrm{ESS} = (\sum w_i)^2 / (N \sum w_i^2) \in [0, 1]$ tells us how concentrated those weights are. The one-call API is `importance_weights_log(samples=x, source=u0, target=u1, flow=flow)`, returning the log-weights ready for `compute_ESS_log` (or `(log_w - log_w.max()).exp()` if you need the linear weights).
 
 ### Resampling: from weighted to equally-weighted particles
 
