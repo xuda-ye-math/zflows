@@ -11,7 +11,7 @@ A small convenience wrapper around [zuko](https://github.com/probabilists/zuko) 
 
 ## Features
 
-**Flexible flow classes and hyperparameters, one unified interface.** Four flow classes are supported — **NSF** (Neural Spline Flow), **NCSF** (Neural *Circular* Spline Flow, for periodic / angular features), **CNF** (Continuous Normalizing Flow / FFJORD), and **RealNVP** (closed-form affine-coupling bijection on $\mathbb R^d$, Dinh et al. 2016) — with the constructors
+**Flexible flow classes and hyperparameters, one unified interface.** Four flow classes are supported — **NSF** (Neural Spline Flow), **NCSF** (Neural *Circular* Spline Flow, for periodic / angular features), **CNF** (Continuous Normalizing Flow / FFJORD), and **RealNVP** (closed-form affine-coupling bijection on $\mathbb R^d$) — with the constructors
 
 ```python
 NSF(a, b, bins=8, slope=1e-3, transforms=4, hidden_features=(64, 64), activation=nn.SiLU)
