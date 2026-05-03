@@ -10,6 +10,7 @@ from zuko.transforms import (
 from zuko.flows import MAF
 from zuko.flows.spline import CircularRQSTransform
 from zuko.flows.continuous import FFJTransform
+from zuko.flows.coupling import GeneralCouplingTransform
 from .potential import Potential
 
 """
@@ -326,6 +327,74 @@ class CNF(Flow):
         """
         return ComposedTransform(self._ffj())
 
+class RealNVP(Flow):
+    """
+    Affine-coupling normalizing flow (RealNVP, Dinh et al. 2016).
+
+    Acts as a bijection on the full unbounded R^d via N stacked coupling
+    transforms with checkered (alternating) feature masks. Each coupling
+    layer splits coordinates into "active" and "passive" halves and
+    applies an affine map  y_a = x_a * exp(s(x_p)) + t(x_p), where the
+    scale s and shift t come from a shared MLP conditioned on x_p; the
+    inverse and log-determinant are closed-form O(d).
+
+    Like CNF, RealNVP lives on R^d natively — no rectangular box is
+    needed and `t()` returns the composition of the coupling transforms
+    without affine conjugation. Compared to NSF, each coupling layer is
+    much weaker per parameter (affine vs. monotonic spline), so several
+    stacked layers are needed; compared to CNF, every operation is
+    closed-form and there is no ODE solver in the loop.
+
+    Arguments:
+        dimension: number of features d.
+        transforms: number of stacked coupling layers. Each individual
+            layer only deforms half the coordinates, so a few are needed
+            to mix all features (recommend: 4-8; 4 is the zflows default,
+            6-8 for harder targets in dimension >= 8).
+        randmask: if True, use random per-layer masks instead of
+            checkered (alternating) ones. Default False is the canonical
+            RealNVP choice and works well in low dimension; set True for
+            high d (>~50) to ensure all feature pairs eventually mix.
+        hidden_features: per-layer widths of the coupling-conditioner
+            MLP (recommend: (64, 64) or (128, 128); widen before
+            deepening).
+        activation: conditioner-MLP activation class, not instance
+            (recommend: nn.SiLU or nn.GELU for smooth densities; the
+            original paper used nn.ReLU, also fine).
+    """
+    def __init__(
+        self,
+        dimension: int,
+        transforms: int = 4,
+        randmask: bool = False,
+        hidden_features: tuple[int, ...] = (64, 64),
+        activation: type[nn.Module] = nn.SiLU, # pass the class, not an instance
+    ):
+        super().__init__()
+        self._coupling = nn.ModuleList()
+        for i in range(transforms):
+            if randmask:
+                mask = torch.randperm(dimension) % 2 == i % 2
+            else:
+                mask = torch.arange(dimension) % 2 == i % 2
+            self._coupling.append(
+                GeneralCouplingTransform(
+                    features=dimension,
+                    context=0,
+                    mask=mask,
+                    hidden_features=hidden_features,
+                    activation=activation,
+                )
+            )
+
+    def t(self) -> ComposedTransform:
+        """
+        Bijection on R^d as a zuko ComposedTransform — the composition
+        of the affine coupling transforms. Supports .inv and
+        .call_and_ladj(x) -> (y, log|det J|).
+        """
+        return ComposedTransform(*[c() for c in self._coupling])
+    
 # reverse KL divergence for energy-based normalizing flow
 def reverse_KL(x: torch.Tensor, target: Potential, flow: Flow):
     """

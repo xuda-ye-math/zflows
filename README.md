@@ -194,3 +194,16 @@ python -m tests.2D_two_moon_CNF
 <p align="center"><img src="tests/2D_two_moon_CNF.png" alt="2D two-moons CNF test" width="700px"></p>
 
 </details>
+
+<details open>
+<summary><strong>6. RealNVP latent-space interpolation</strong></summary>
+
+[`tests/2D_RealNVP_latent_interpolation.py`](tests/2D_RealNVP_latent_interpolation.py) (writeup: [`tests/2D_RealNVP_latent_interpolation.md`](tests/2D_RealNVP_latent_interpolation.md)) trains a `RealNVP` by forward-KL on a 4-corner Gaussian mixture, then exercises the bijection in the *inverse* direction: pull each mode center back to the latent space via $z = F^{-1}(x)$, draw straight lines between latent anchors, and decode them with $F$. The decoded curves bend through the data manifold rather than cutting straight across the gaps — the canonical RealNVP morphing demo from Dinh et al. (2016), reduced to 2D so the latent and data spaces are both visible. This is the only test in the folder that puts $F^{-1}$ in the foreground, and the script runs end-to-end only because RealNVP's inverse and log-determinant are *closed-form* and $O(d)$ — repeating it with NSF (bisection inverse) or CNF (adaptive ODE) would be visibly slower.
+
+```bash
+python -m tests.2D_RealNVP_latent_interpolation
+```
+
+<p align="center"><img src="tests/2D_RealNVP_latent_interpolation.png" alt="2D RealNVP latent interpolation" width="700px"></p>
+
+</details>
