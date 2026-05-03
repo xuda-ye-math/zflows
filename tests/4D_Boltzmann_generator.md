@@ -25,9 +25,9 @@ with $\mu_k \propto \exp(-U_k)$. Each rung's training step does five things, in 
 
 1. **Resample.** Draw a working set $x_{\mathrm{train}, k-1}$ of size $N_{\mathrm{train}}$ uniformly with replacement from the previous rung's particle cloud $x_{\mathrm{valid}, k-1} \sim \mu_{k-1}$.
 2. **Train.** Update the *single* shared flow $F$ to minimize reverse KL from $\mu_{k-1}$ to $\mu_k$, treating $x_{\mathrm{train}, k-1}$ as samples from the source. The $U_{k-1}(x)$ term is parameter-independent and drops out of the gradient, so `reverse_KL(x, target=U_k, flow=F)` is the correct loss as-is.
-3. **Importance sample.** Push the full validation set $x_{\mathrm{valid}, k-1}$ through $F$ to get proposals $y$ and log-weights $\log w = -U_k(y) + U_{k-1}(x_{\mathrm{valid}, k-1}) + \log|\det J_F|$. Report the ESS as a self-test for this rung.
+3. **Importance sample.** Push the full validation set $x_{\mathrm{valid}, k-1}$ through $F$ to get proposals $y$ and log-weights $\log w = -U_k(y) + U_{k-1}(x_{\mathrm{valid}, k-1}) + \log|\det J_F|$ via `importance_weights_log(samples, source=U_{k-1}, target=U_k, flow=flow)`. Report the ESS as a self-test for this rung.
 4. **Resample by weight.** Multinomial draw to convert the weighted cloud into an equally-weighted cloud $\tilde y$.
-5. **Rejuvenate.** Run MALA (Metropolis-adjusted Langevin) against $U_k$ to break duplicate particles and remove residual proposal bias. Output $x_{\mathrm{valid}, k}$ for the next rung.
+5. **Rejuvenate.** Run MALA (Metropolis-adjusted Langevin) against $U_k$ to break duplicate particles and remove residual proposal bias. The script opts in to **both** compiled fast paths on the bridge potential — `U_k.enable_grad()` for the gradient $\nabla U_k$ used in the proposal, and `U_k.enable_eval()` for the energy $U_k$ used in the accept/reject step — so each MALA iteration is two fused kernel calls instead of two autograd-graph rebuilds. Output $x_{\mathrm{valid}, k}$ for the next rung.
 
 Only the validation cloud $x_{\mathrm{valid}, k}$ is carried across rungs; the optimizer state is re-used so the flow warm-starts each step.
 
@@ -56,7 +56,7 @@ Pointers into the script:
 - per-rung loop (5 steps: resample → train → IS → resample → MALA): [`4D_Boltzmann_generator.py:92–136`](4D_Boltzmann_generator.py#L92-L136)
 - saving the cache: [`4D_Boltzmann_generator.py:138–144`](4D_Boltzmann_generator.py#L138-L144)
 - ESS history printout: [`4D_Boltzmann_generator.py:146–150`](4D_Boltzmann_generator.py#L146-L150)
-- two-row visualization (Cartesian + polar): [`4D_Boltzmann_generator.py:152–218`](4D_Boltzmann_generator.py#L152-L218)
+- two-row visualization (Cartesian + polar): [`4D_Boltzmann_generator.py:152–217`](4D_Boltzmann_generator.py#L152-L217)
 
 The first invocation runs the annealing ($M = 12$ rungs of training + IS + MALA) and saves a `.pt` cache containing `x_valid_history` (M+1 snapshots) and `ess_history` (M floats). Subsequent invocations load the cache and skip directly to the visualization.
 
@@ -88,9 +88,9 @@ The figure below plots the validation particles at $k = 0, 4, 8, 12$ in two rows
 
 - `Linear_Combination` builds the bridge potentials with a single coefficient parameter that can be reused at every rung;
 - `reverse_KL` is the per-rung loss without any modification (the source-energy term drops out automatically);
-- `compute_ESS_log` is the per-rung diagnostic;
+- `importance_weights_log` is the one-call IS reweighting against the just-trained flow, ready to feed into `compute_ESS_log` for the per-rung diagnostic;
 - `resample` converts weighted clouds to equal-weight ones for the next rung;
-- `Potential.enable_grad()` provides the compiled gradient that `rejuvenation` (MALA via overdamped Langevin) needs to break duplicate particles and remove residual flow bias;
+- `Potential.enable_grad()` and `.enable_eval()` provide the compiled gradient and forward fast paths that MALA (`rejuvenation` with `adjust=True`) uses for the proposal and the accept/reject step respectively;
 - `NSF` provides the spline bijection on the rectangular box, with one set of parameters re-used across all $M$ rungs (warm-start fine-tuning).
 
 The full pipeline is the *propose → reweight → resample → rejuvenate* loop that drives every modern flow-augmented SMC sampler — packaged here in the smallest dimension where you can still see it work.

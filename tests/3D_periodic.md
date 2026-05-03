@@ -40,20 +40,18 @@ IS produces $N$ samples $\{\theta_i\}$ with unequal weights $\{w_i\}$. Many down
 
 `resample(samples, weights)` does this in one line.
 
-### `enable_grad`: opt-in compiled gradients for `Potential`
+### `enable_grad` and `enable_eval`: opt-in compiled fast paths for `Potential`
 
-The rejuvenation step needs $\nabla U_1(\theta)$. The base `Potential` class does **not** build a gradient by default — many use cases (forward-only sampling, IS evaluation, KL training) only need $U_1$ itself, and we don't want to pay the `torch.compile` startup cost or pull in `torch.func` for those. The `.enable_grad()` method is the opt-in:
+The rejuvenation step needs $\nabla U_1(\theta)$ for the proposal *and* $U_1(\theta)$ itself for the MALA accept/reject decision. The base `Potential` class does **not** build either fast path by default — many use cases (forward-only sampling, IS evaluation, KL training) only need a regular `u1(x)` call, and we don't want to pay the `torch.compile` startup cost or pull in `torch.func` for those. Two opt-ins are exposed:
 
 ```python
-u1.enable_grad()       # builds .grad once, returns self for chaining
+u1.enable_grad()       # compiles vmap(grad(u1)),  stored in u1._grad_fn
+u1.enable_eval()       # compiles u1.forward,      stored in u1._eval_fn
 g = u1.grad(theta)     # [N, d], works without theta.requires_grad=True
+v = u1.eval(theta)     # [N], faster than u1(theta) on the MALA hot loop
 ```
 
-Under the hood (in [`zflows/potential.py`](../zflows/potential.py)), it caches
-$$
-\nabla U_1 \;=\; \texttt{torch.compile}\bigl(\texttt{vmap}(\texttt{grad}(U_1))\bigr)
-$$
-so every subsequent `.grad(theta)` is a single fused kernel call, with no Python-level autograd graph construction. The call is **idempotent** — calling `.enable_grad()` twice is a no-op — and it raises a clear `RuntimeError` if you call `.grad(...)` without first calling `.enable_grad()`. The two `os.environ.setdefault(...)` lines in the script just suppress Triton's autotuning chatter and serialize Inductor's worker pool for cleaner output during the first compile.
+Under the hood (in [`zflows/potential.py`](../zflows/potential.py)), `enable_grad` caches $\nabla U_1 = \texttt{torch.compile}(\texttt{vmap}(\texttt{grad}(U_1)))$, and `enable_eval` caches $\texttt{torch.compile}(U_1)$, so every subsequent `.grad(\theta)` / `.eval(\theta)` is a single fused kernel call with no Python-level autograd-graph construction. Both calls are **idempotent** (a second invocation does not recompile) and chainable. Inside the MALA branch of `langevin()`, if `_eval_fn` is populated the energy evaluations $U_1(y)$ and $U_1(x)$ in $\log\alpha$ route through it; otherwise they fall back to the regular `u1(\theta)` call. `u1.eval()` with no argument retains the standard `nn.Module` semantics (switch to eval mode, return `self`). The two `os.environ.setdefault(...)` lines in the script just suppress Triton's autotuning chatter and serialize Inductor's worker pool for cleaner output during the first compile.
 
 ### Rejuvenation: overdamped Langevin
 
@@ -79,15 +77,15 @@ python -m tests.3D_periodic
 
 Pointers into the script:
 
-- imports & device setup: [`3D_periodic.py:1–11`](3D_periodic.py#L1-L11)
-- source (uniform on the 3-torus) and target ($U_1$ ridge mixture): [`3D_periodic.py:13–31`](3D_periodic.py#L13-L31)
-- NCSF init: [`3D_periodic.py:34–38`](3D_periodic.py#L34-L38)
-- training parameters: [`3D_periodic.py:40–44`](3D_periodic.py#L40-L44)
-- training loop (mini-batched reverse KL): [`3D_periodic.py:46–67`](3D_periodic.py#L46-L67)
-- IS reweighting + $\mathrm{ESS}$: [`3D_periodic.py:70–81`](3D_periodic.py#L70-L81)
-- resample weighted cloud → equal-weight cloud: [`3D_periodic.py:83–86`](3D_periodic.py#L83-L86)
-- `enable_grad` + Langevin rejuvenation: [`3D_periodic.py:88–93`](3D_periodic.py#L88-L93)
-- 3D scatter plot: [`3D_periodic.py:95–113`](3D_periodic.py#L95-L113)
+- imports & device setup: [`3D_periodic.py:1–12`](3D_periodic.py#L1-L12)
+- source (uniform on the 3-torus) and target ($U_1$ ridge mixture): [`3D_periodic.py:14–32`](3D_periodic.py#L14-L32)
+- NCSF init: [`3D_periodic.py:35–39`](3D_periodic.py#L35-L39)
+- training parameters: [`3D_periodic.py:42–45`](3D_periodic.py#L42-L45)
+- training loop (mini-batched reverse KL): [`3D_periodic.py:47–68`](3D_periodic.py#L47-L68)
+- IS reweighting via `importance_weights_log` + $\mathrm{ESS}$: [`3D_periodic.py:73–79`](3D_periodic.py#L73-L79)
+- resample weighted cloud → equal-weight cloud: [`3D_periodic.py:82–84`](3D_periodic.py#L82-L84)
+- `enable_eval` + `enable_grad` + Langevin rejuvenation: [`3D_periodic.py:86–92`](3D_periodic.py#L86-L92)
+- 3D scatter plot: [`3D_periodic.py:99–112`](3D_periodic.py#L99-L112)
 
 <p align="center"><img src="3D_periodic.png" alt="3D periodic test" width="500px"></p>
 
@@ -96,7 +94,7 @@ Pointers into the script:
 1. **Train.** Reverse KL fits an NCSF proposal $\nu = F_\# \mu_0$ to the target $\mu_1 \propto \exp(-U_1)$, using only $U_1$ (no target samples).
 2. **Importance sampling.** Push $\mu_0$-samples through $F$, compute log-weights $\log w = -U_1(F(x)) + U_0(x) + \log|\det J_F|$, report $\mathrm{ESS}$ as a self-test.
 3. **Resample.** Multinomial resampling $\{\theta_i, w_i\} \to \{\theta_{j_i}\}$ converts a weighted cloud into an equally-weighted cloud (with duplicate particles).
-4. **Enable gradients.** `u1.enable_grad()` builds a `torch.compile`-compiled `vmap(grad(U_1))` once and caches it on the instance.
-5. **Rejuvenate.** Overdamped Langevin (alias `rejuvenation`) breaks the duplicates apart and slightly corrects residual proposal bias by simulating an SDE whose stationary density is exactly $\mu_1$.
+4. **Enable gradients (and forward).** `u1.enable_grad()` builds a `torch.compile`-compiled `vmap(grad(U_1))`; `u1.enable_eval()` additionally builds a compiled forward $U_1(\theta)$. Both are cached on the instance and reused on every subsequent call.
+5. **Rejuvenate.** Overdamped Langevin (alias `rejuvenation`) with `adjust=True` runs MALA: the proposal uses `u1.grad`, and the accept/reject step uses `u1.eval` when `_eval_fn` is populated (else falls back to `u1(theta)`). The stationary density is exactly $\mu_1$.
 
 The NCSF + IS + resample + Langevin pipeline is the basic building block of *flow-augmented SMC* on manifolds: the flow gives a good global proposal, IS provides unbiased correction, and Langevin gives local mixing using the geometry of $U_1$ itself.
