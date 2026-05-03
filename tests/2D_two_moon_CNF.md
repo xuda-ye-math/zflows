@@ -1,14 +1,14 @@
 # 2D test: data-driven training of a Continuous Normalizing Flow on two moons
 
-We train a Continuous Normalizing Flow (CNF / FFJORD) by forward-KL on samples from the classic *two-moons* distribution. The point of this test is twofold: (i) exercise the `CNF` class on a target whose support is **topologically non-trivial** (two interlocking arcs, neither separable along an axis), and (ii) provide a side-by-side reference against the spline-based [`2D_forward_KL.py`](2D_forward_KL.py) test, so the CNF/NSF trade-off is concrete rather than abstract.
+We train a Continuous Normalizing Flow (CNF / FFJORD) by forward KL on samples from the classic *two-moons* distribution. The point of this test is twofold: (i) exercise the `CNF` class on a target whose support is **topologically non-trivial** (two interlocking arcs, neither separable along an axis), and (ii) provide a side-by-side reference against the spline-based [`2D_forward_KL.py`](2D_forward_KL.py) test, so the CNF/NSF trade-off is concrete rather than abstract.
 
 - **Source.** $\mu_0 = \mathcal N(0, I_2)$, the standard 2D Gaussian on $\mathbb R^2$. Unlike NSF, CNF lives on the full unbounded $\mathbb R^d$, so there is no rectangular box to specify.
 - **Target.** Two interleaving half-circles in $\mathbb R^2$, sampled by drawing $t \sim \mathrm{Uniform}[0, \pi]$ and emitting $(\cos t - 0.5, \sin t - 0.25)$ (upper moon) or $(0.5 - \cos t, 0.25 - \sin t)$ (lower moon), with $\mathcal N(0, 0.1^2 I)$ Gaussian noise added per coordinate. The two moons are point-symmetric through the origin and live in roughly $[-1.5, 1.5]^2$.
-- **Flow.** A `CNF` with `frequency=5` time-Fourier features and a `(128, 128, 128)` ODE-drift MLP; trained for 50 epochs of forward-KL with Adam at `lr=1e-2` and a cosine schedule to zero.
+- **Flow.** A `CNF` with `frequency=5` time-Fourier features and a `(128, 128, 128)` ODE-drift MLP; trained for 50 epochs of forward KL with Adam at `lr=1e-2` and a cosine schedule to zero.
 
 ## Mathematical background
 
-The forward-KL loss is identical to the spline case — the `Flow` interface hides which bijection sits underneath. With $F = \mathrm{flow}.t()$ the flow's bijection on $\mathbb R^2$,
+The forward KL loss is identical to the spline case — the `Flow` interface hides which bijection sits underneath. With $F = \mathrm{flow}.t()$ the flow's bijection on $\mathbb R^2$,
 
 $$
 \mathcal L_{\mathrm{forward}}[F] = \mathbb E_{y \sim \mu_1} \bigl[\, U_0(F^{-1}(y)) + \log |\det J_F(F^{-1}(y))| \,\bigr],
@@ -48,7 +48,7 @@ Pointers into the script:
 - source ($\mathcal N(0, I_2)$) and `two_moons_samples` helper: [`2D_two_moon_CNF.py:10-23`](2D_two_moon_CNF.py#L10-L23)
 - CNF init: [`2D_two_moon_CNF.py:26`](2D_two_moon_CNF.py#L26)
 - training parameters & cosine LR schedule: [`2D_two_moon_CNF.py:28-37`](2D_two_moon_CNF.py#L28-L37)
-- training loop (mini-batched forward-KL): [`2D_two_moon_CNF.py:39-58`](2D_two_moon_CNF.py#L39-L58)
+- training loop (mini-batched forward KL): [`2D_two_moon_CNF.py:39-58`](2D_two_moon_CNF.py#L39-L58)
 - plotting (source / pushforward / target): [`2D_two_moon_CNF.py:60-90`](2D_two_moon_CNF.py#L60-L90)
 
 <p align="center"><img src="2D_two_moon_CNF.png" alt="2D two-moons CNF test" width="700px"></p>
@@ -59,7 +59,7 @@ Pointers into the script:
 
 **Why this target is a CNF strength.** The two moons cannot be separated by axis-aligned splits: any horizontal or vertical line crosses both arcs. An NSF would need several stacked autoregressive transforms, each with permutation-invariant coupling, to reach the same fidelity, because each individual spline transform deforms the plane only along one coordinate at a time. The CNF, by contrast, learns a smooth velocity field $v_\phi(x, t)$ that bends *both* coordinates simultaneously and continuously — the integration time $t$ acts as an extra "depth" dimension that an autoregressive flow does not have.
 
-**CNF vs. NSF — a concrete comparison.** Both flow classes solve the same forward-KL problem and expose the same `Flow` interface in `zflows`. The trade-off comes down to:
+**CNF vs. NSF — a concrete comparison.** Both flow classes solve the same forward KL problem and expose the same `Flow` interface in `zflows`. The trade-off comes down to:
 
 | | `NSF` (autoregressive splines) | `CNF` (FFJORD) |
 |---|---|---|

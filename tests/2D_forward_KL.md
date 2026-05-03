@@ -51,10 +51,10 @@ Pointers into the script:
 - source (standard Gaussian) and target (3-mode mixture): [`2D_forward_KL.py:10–26`](2D_forward_KL.py#L10-L26)
 - flow init: [`2D_forward_KL.py:29`](2D_forward_KL.py#L29)
 - training parameters: [`2D_forward_KL.py:31–35`](2D_forward_KL.py#L31-L35)
-- training data sampled from $\mu_1$, training loop (mini-batched forward-KL): [`2D_forward_KL.py:37–59`](2D_forward_KL.py#L37-L59)
+- training data sampled from $\mu_1$, training loop (mini-batched forward KL): [`2D_forward_KL.py:37–59`](2D_forward_KL.py#L37-L59)
 - plotting (source / pushforward / target ground truth): [`2D_forward_KL.py:61–91`](2D_forward_KL.py#L61-L91)
 
-<p align="center"><img src="2D_forward_KL.png" alt="forward-KL test" width="700px"></p>
+<p align="center"><img src="2D_forward_KL.png" alt="forward KL test" width="700px"></p>
 
 ## Analysis
 
