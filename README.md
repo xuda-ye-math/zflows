@@ -42,7 +42,17 @@ The gradient closure is built once, cached on the instance, and reused every cal
 
 **One-line KL losses.** `reverse_KL(x, target, flow)` and `forward_KL(y, source, flow)` are direct-call functions returning a scalar loss — drop them straight into a training loop, no boilerplate.
 
-**SMC-style utilities.** `resample(samples, weights)` for multinomial resampling; `langevin(samples, potential, step, iters, adjust=False, chunk=1)` (alias `rejuvenation`) for overdamped Langevin updates, with `adjust=True` switching from plain ULA to MALA (Metropolis-adjusted Langevin) and `chunk` bounding peak VRAM by splitting the batch; `compute_ESS`, `compute_ESS_log`, `compute_CESS`, `compute_CESS_log` for importance-sampling diagnostics, with log-space variants using `logsumexp` for numerical stability.
+**SMC-style utilities.** Direct-call building blocks for the *propose → reweight → resample → rejuvenate* loop:
+
+```python
+importance_weights(samples, source, target, flow, chunk=1) # log w = -target(F(x)) + source(x) + log|det J_F|
+resample(samples, weights)                                 # multinomial resampling with replacement
+langevin(samples, potential, step, iters, adjust=False, chunk=1) # alias: rejuvenation; adjust=True -> MALA
+compute_ESS(weights)                                       # importance-sampling diagnostic
+compute_CESS(source_weights, importance_weights)           # conditional ESS diagnostic
+```
+
+`chunk` splits the batch along dim 0 to bound peak VRAM (statistically equivalent to `chunk=1`).
 
 Together these compose into a complete *propose → reweight → resample → rejuvenate* pipeline with no glue code on the user side.
 

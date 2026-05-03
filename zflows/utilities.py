@@ -73,7 +73,7 @@ def compute_CESS_log(source_weights: torch.Tensor, log_importance_weights: torch
     log_w2 = log_s + 2 * log_importance_weights
     return (2 * torch.logsumexp(log_w1, dim=0) - torch.logsumexp(log_w2, dim=0)).exp()
 
-def importance_weights(samples: torch.Tensor, source: Potential, target: Potential, flow: Flow) -> torch.Tensor:
+def importance_weights(samples: torch.Tensor, source: Potential, target: Potential, flow: Flow, chunk: int = 1) -> torch.Tensor:
     """
     Linear-space self-normalized importance weights for the proposal
     `nu = F_# source` against the target `mu_1 ~ exp(-target)`. Thin
@@ -96,13 +96,19 @@ def importance_weights(samples: torch.Tensor, source: Potential, target: Potenti
         source:  Potential       source (proposal-base) potential U_0
         target:  Potential       target potential U_1
         flow:    Flow            normalizing flow providing F = flow.t()
+        chunk:   int             split `samples` along dim 0 into this many
+                                 chunks and accumulate. Reduces peak GPU
+                                 memory at the cost of wall time;
+                                 statistically and numerically equivalent
+                                 to chunk=1 (the per-sample log-weight
+                                 only depends on its own (x, F(x))).
     Output:
         w: Tensor [N]   unnormalized importance weights in [0, 1].
     """
-    log_w = importance_weights_log(samples, source, target, flow)
+    log_w = importance_weights_log(samples, source, target, flow, chunk=chunk)
     return (log_w - log_w.max()).exp()
 
-def importance_weights_log(samples: torch.Tensor, source: Potential, target: Potential, flow: Flow) -> torch.Tensor:
+def importance_weights_log(samples: torch.Tensor, source: Potential, target: Potential, flow: Flow, chunk: int = 1) -> torch.Tensor:
     """
     Self-normalized importance-sampling log-weights for the proposal
     `nu = F_# source` against the target `mu_1 ~ exp(-target)`, where
@@ -126,14 +132,23 @@ def importance_weights_log(samples: torch.Tensor, source: Potential, target: Pot
         source:  Potential       source (proposal-base) potential U_0
         target:  Potential       target potential U_1
         flow:    Flow            normalizing flow providing F = flow.t()
+        chunk:   int             split `samples` along dim 0 into this many
+                                 chunks and concatenate the per-chunk
+                                 log-weights. Reduces peak GPU memory at
+                                 the cost of wall time; statistically and
+                                 numerically equivalent to chunk=1 (each
+                                 sample's log-weight depends only on its
+                                 own (x, F(x))).
     Output:
         log_w: Tensor [N]   unnormalized log importance weights, ready
                             to feed into compute_ESS_log / compute_CESS_log
                             or to exponentiate (after subtracting max).
     """
-    x = samples
-    y, ladj = flow.t().call_and_ladj(x)
-    return -target(y) + source(x) + ladj
+    out = []
+    for x in torch.chunk(samples, chunk, dim=0):
+        y, ladj = flow.t().call_and_ladj(x)
+        out.append(-target(y) + source(x) + ladj)
+    return torch.cat(out, dim=0)
 
 def resample(samples: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     """
