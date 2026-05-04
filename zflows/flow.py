@@ -50,43 +50,6 @@ class Flow(nn.Module, ABC):
     @abstractmethod
     def t(self) -> ComposedTransform: ...
 
-
-def call_and_ladj_grad(
-    flow_t: ComposedTransform,
-    x: torch.Tensor,
-    create_graph: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Apply a zuko ComposedTransform F = flow_t and return (y, ladj, ladj_grad):
-        y         = F(x)             [N, d]
-        ladj      = log|det J_F(x)|  [N]
-        ladj_grad = d ladj / d x     [N, d]
-
-    Typical use: pass flow.t() in:
-        y, ladj, ladj_grad = _call_and_ladj_grad(flow.t(), x)
-
-    Special-purpose helper: kept as a free function because it is a
-    sample-aware convenience that requires `requires_grad` bookkeeping,
-    not a transform-level operation.
-
-    Argument:
-        create_graph: if True (default) the returned ladj_grad is itself
-            differentiable w.r.t. the flow's parameters; pass False for
-            a ~30-50% faster, lower-memory call when only the value of
-            ladj_grad is needed (e.g. diagnostics or no-backprop inference).
-
-    Note: x must be an autograd leaf with requires_grad=True. If
-    x.requires_grad is False, this function detaches and re-leafs it.
-    """
-    if not x.requires_grad:
-        x = x.detach().requires_grad_(True)
-    y, ladj = flow_t.call_and_ladj(x)
-    (ladj_grad,) = torch.autograd.grad(
-        ladj.sum(), x, create_graph=create_graph,
-    )
-    return y, ladj, ladj_grad
-
-
 class NSF(Flow, MAF):
     """
     Neural Spline Flow whose transform is a bijection on the rectangle
