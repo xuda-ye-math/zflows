@@ -91,7 +91,7 @@ The curve from bottom-left to bottom-right hugs the bottom edge of the plot rath
 **What this test demonstrates about `zflows`.**
 
 - `RealNVP` exposes the same `flow.t()` interface as every other `Flow` subclass — `F.inv(y)` and `F(x)` are both closed-form, fast, and differentiable, and the script never has to reach into zuko internals.
-- The `forward_KL(y, source=u0, flow=flow)` loss works unchanged across NSF, NCSF, CNF, and RealNVP — the same training loop transports between flow classes with a one-line constructor swap.
+- The `forward_KL(y, source=u0, F=flow.t())` loss works unchanged across NSF, NCSF, CNF, and RealNVP — the same training loop transports between flow classes with a one-line constructor swap.
 - The bijection contract holds numerically: the round-trip assertion at line 83 passes, confirming that for any anchor $x$ the inverse-then-forward returns $x$ to within floating-point precision. This is what makes the latent-interpolation demo *meaningful* rather than aesthetic — every decoded curve genuinely starts and ends at its anchor.
 
 The test is the smallest example that puts the inverse direction in the foreground; combined with [`_RealNVP_interface.py`](_RealNVP_interface.py) (which verifies the bijection contract numerically) and [`2D_two_moon_CNF.md`](2D_two_moon_CNF.md) (which makes the closed-form-vs.-ODE trade-off concrete), it completes the picture of when each flow class is the right tool.

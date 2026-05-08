@@ -35,7 +35,7 @@ Dropping the parameter-free constant gives the trainable loss
 $$
 \mathcal L_{\mathrm{forward}}[F] = \mathbb E_{y \sim \mu_1} \Bigl[ U_0(F^{-1}(y)) + \log |\det J_F(F^{-1}(y))| \Bigr].
 $$
-Equivalently, this is just the negative log-likelihood of the data under the flow density $\nu$. The package exposes it as `forward_KL(y, source, flow)`.
+Equivalently, this is just the negative log-likelihood of the data under the flow density $\nu$. The package exposes it as `forward_KL(y, source, F)`, where `F = flow.t()` is the bijection.
 
 ## Implementation and execution
 

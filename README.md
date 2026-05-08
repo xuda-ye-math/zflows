@@ -40,12 +40,12 @@ g = u.grad(x) # x: [N, d] -> g: [N, d], no requires_grad_ on x needed
 
 The gradient closure is built once, cached on the instance, and reused every call — making heavy-load Langevin / MALA sampling fast (one fused kernel per step instead of an autograd graph rebuild). The call is idempotent and chainable; calling `.grad()` without `.enable_grad()` raises a clear `RuntimeError`.
 
-**One-line KL losses.** `reverse_KL(x, target, flow)` and `forward_KL(y, source, flow)` are direct-call functions returning a scalar loss — drop them straight into a training loop, no boilerplate.
+**One-line KL losses.** `reverse_KL(x, target, F)` and `forward_KL(y, source, F)` are direct-call functions returning a scalar loss — drop them straight into a training loop, no boilerplate. `F = flow.t()` is the bijection (a `ComposedTransform`).
 
 **SMC-style utilities.** Direct-call building blocks for the *propose → reweight → resample → rejuvenate* loop:
 
 ```python
-importance_weights(samples, source, target, flow, chunk=1) # log w = -target(F(x)) + source(x) + log|det J_F|
+importance_weights(samples, source, target, F, chunk=1)   # log w = -target(F(x)) + source(x) + log|det J_F|
 resample(samples, weights)                                 # multinomial resampling with replacement
 langevin(samples, potential, step, iters, adjust=False, chunk=1) # alias: rejuvenation; adjust=True -> MALA
 compute_ESS(weights)                                       # importance-sampling diagnostic

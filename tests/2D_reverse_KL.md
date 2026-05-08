@@ -33,7 +33,7 @@ Dropping the (parameter-independent) constant gives the trainable loss, estimate
 $$
 \mathcal L_{\mathrm{reverse}}[F] = \mathbb E_{x \sim \mu_0} \Bigl[ U_1(F(x)) - \log |\det J_F(x)| \Bigr].
 $$
-The package exposes this as `reverse_KL(x, target, flow)`.
+The package exposes this as `reverse_KL(x, target, F)`, where `F = flow.t()` is the bijection.
 
 ### Importance sampling and $\mathrm{ESS}$
 
