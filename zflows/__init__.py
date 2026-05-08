@@ -1,4 +1,11 @@
-"""This package is a convenient wrapper of zuko for implementing normalizing flow."""
+"""This package is a convenient wrapper of zuko for implementing normalizing flow.
+
+Internal module dependencies:
+    potential.py   - no internal deps
+    flow.py        - no internal deps
+    loss.py        - imports potential
+    utilities.py   - imports potential
+"""
 
 from .potential import Potential, Uniform, Gaussian, Gaussian_Mixture, Linear_Combination
 from .flow import Flow, NSF, NCSF, CNF, RealNVP

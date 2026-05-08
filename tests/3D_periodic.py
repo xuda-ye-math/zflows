@@ -55,7 +55,7 @@ for epoch in range(EPOCH):
         idx = perm[start:start + BATCH]
         x_batch = x[idx]
 
-        loss = reverse_KL(x_batch, target=u1, flow=flow)
+        loss = reverse_KL(x_batch, target=u1, F=flow.t())
 
         optimizer.zero_grad()
         loss.backward()
@@ -73,7 +73,7 @@ import matplotlib.pyplot as plt
 with torch.no_grad():
     x_plot = u0.samples(N) # fresh samples from source
     y_plot, _ = flow.t().call_and_ladj(x_plot) # pushforward F(x), used for resampling
-    log_w = importance_weights_log(x_plot, source=u0, target=u1, flow=flow, chunk=2)
+    log_w = importance_weights_log(x_plot, source=u0, target=u1, F=flow.t(), chunk=2)
 
 ess = compute_ESS_log(log_w)
 print(f"ESS = {ess.item():.4f}")

@@ -11,7 +11,6 @@ from zuko.flows import MAF
 from zuko.flows.spline import CircularRQSTransform
 from zuko.flows.continuous import FFJTransform
 from zuko.flows.coupling import GeneralCouplingTransform
-from .potential import Potential
 
 """
 All Flow classes assume context=0, i.e. the normalizing flow is always

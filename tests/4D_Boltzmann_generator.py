@@ -106,7 +106,7 @@ else:
             epoch_loss, n_batches = 0.0, 0
             for start in range(0, N_TRAIN, BATCH):
                 x_batch = x_train_prev[perm[start:start + BATCH]]
-                loss = reverse_KL(x_batch, target=U_curr, flow=flow)
+                loss = reverse_KL(x_batch, target=U_curr, F=flow.t())
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -118,7 +118,7 @@ else:
         # (3) push validation samples through the trained flow, IS-correct, resample
         with torch.no_grad():
             y_pf, _ = flow.t().call_and_ladj(x_valid_prev) # F(x_valid_prev) for resampling
-            log_w = importance_weights_log(x_valid_prev, source=U_prev, target=U_curr, flow=flow)
+            log_w = importance_weights_log(x_valid_prev, source=U_prev, target=U_curr, F=flow.t())
             ess = compute_ESS_log(log_w)
             print(f"  ESS = {ess.item():.4f}")
             ess_history.append(ess.item())

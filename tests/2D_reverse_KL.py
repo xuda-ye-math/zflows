@@ -41,7 +41,7 @@ for epoch in range(EPOCH):
         idx = perm[start:start + BATCH]
         x_batch = x[idx]
 
-        loss = reverse_KL(x_batch, target=u1, flow=flow)
+        loss = reverse_KL(x_batch, target=u1, F=flow.t())
 
         optimizer.zero_grad()
         loss.backward()

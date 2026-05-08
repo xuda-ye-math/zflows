@@ -5,6 +5,7 @@
 # This bootstrap script
 git_init.sh
 run_all_tests.sh
+main.tex
 
 # Build / packaging artifacts
 *.egg-info/
@@ -22,4 +23,7 @@ __pycache__/
 # Data / model checkpoints
 *.pth
 *.pt
+
+# Local DB experiments
+DB_tests/
 

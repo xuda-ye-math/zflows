@@ -1,8 +1,8 @@
 # pyright: reportOperatorIssue=false
 
 import torch
+from zuko.transforms import ComposedTransform
 from .potential import Potential
-from .flow import Flow
 
 def compute_ESS(weights: torch.Tensor) -> torch.Tensor:
     """
@@ -73,7 +73,7 @@ def compute_CESS_log(source_weights: torch.Tensor, log_importance_weights: torch
     log_w2 = log_s + 2 * log_importance_weights
     return (2 * torch.logsumexp(log_w1, dim=0) - torch.logsumexp(log_w2, dim=0)).exp()
 
-def importance_weights(samples: torch.Tensor, source: Potential, target: Potential, flow: Flow, chunk: int = 1) -> torch.Tensor:
+def importance_weights(samples: torch.Tensor, source: Potential, target: Potential, F: ComposedTransform, chunk: int = 1) -> torch.Tensor:
     """
     Linear-space self-normalized importance weights for the proposal
     `nu = F_# source` against the target `mu_1 ~ exp(-target)`. Thin
@@ -92,28 +92,28 @@ def importance_weights(samples: torch.Tensor, source: Potential, target: Potenti
     tail diagnostics).
 
     Input:
-        samples: Tensor [N, d]   particles drawn from `source`
-        source:  Potential       source (proposal-base) potential U_0
-        target:  Potential       target potential U_1
-        flow:    Flow            normalizing flow providing F = flow.t()
-        chunk:   int             split `samples` along dim 0 into this many
-                                 chunks and accumulate. Reduces peak GPU
-                                 memory at the cost of wall time;
-                                 statistically and numerically equivalent
-                                 to chunk=1 (the per-sample log-weight
-                                 only depends on its own (x, F(x))).
+        samples: Tensor [N, d]      particles drawn from `source`
+        source:  Potential          source (proposal-base) potential U_0
+        target:  Potential          target potential U_1
+        F:       ComposedTransform  forward flow map (typically obtained as flow.t())
+        chunk:   int                split `samples` along dim 0 into this many
+                                    chunks and accumulate. Reduces peak GPU
+                                    memory at the cost of wall time;
+                                    statistically and numerically equivalent
+                                    to chunk=1 (the per-sample log-weight
+                                    only depends on its own (x, F(x))).
     Output:
         w: Tensor [N]   unnormalized importance weights in [0, 1].
     """
-    log_w = importance_weights_log(samples, source, target, flow, chunk=chunk)
+    log_w = importance_weights_log(samples, source, target, F, chunk=chunk)
     return (log_w - log_w.max()).exp()
 
-def importance_weights_log(samples: torch.Tensor, source: Potential, target: Potential, flow: Flow, chunk: int = 1) -> torch.Tensor:
+def importance_weights_log(samples: torch.Tensor, source: Potential, target: Potential, F: ComposedTransform, chunk: int = 1) -> torch.Tensor:
     """
     Self-normalized importance-sampling log-weights for the proposal
     `nu = F_# source` against the target `mu_1 ~ exp(-target)`, where
-    `F = flow.t()` is the trained bijection that pushes source samples
-    toward the target.
+    `F` is the trained bijection that pushes source samples toward the
+    target.
 
     For x ~ source, y = F(x), the proposal density is
         log nu(y) = log source(x) - log|det J_F(x)|.
@@ -128,17 +128,17 @@ def importance_weights_log(samples: torch.Tensor, source: Potential, target: Pot
     the per-iter MALA hot path.
 
     Input:
-        samples: Tensor [N, d]   particles drawn from `source`
-        source:  Potential       source (proposal-base) potential U_0
-        target:  Potential       target potential U_1
-        flow:    Flow            normalizing flow providing F = flow.t()
-        chunk:   int             split `samples` along dim 0 into this many
-                                 chunks and concatenate the per-chunk
-                                 log-weights. Reduces peak GPU memory at
-                                 the cost of wall time; statistically and
-                                 numerically equivalent to chunk=1 (each
-                                 sample's log-weight depends only on its
-                                 own (x, F(x))).
+        samples: Tensor [N, d]      particles drawn from `source`
+        source:  Potential          source (proposal-base) potential U_0
+        target:  Potential          target potential U_1
+        F:       ComposedTransform  forward flow map (typically obtained as flow.t())
+        chunk:   int                split `samples` along dim 0 into this many
+                                    chunks and concatenate the per-chunk
+                                    log-weights. Reduces peak GPU memory at
+                                    the cost of wall time; statistically and
+                                    numerically equivalent to chunk=1 (each
+                                    sample's log-weight depends only on its
+                                    own (x, F(x))).
     Output:
         log_w: Tensor [N]   unnormalized log importance weights, ready
                             to feed into compute_ESS_log / compute_CESS_log
@@ -146,7 +146,7 @@ def importance_weights_log(samples: torch.Tensor, source: Potential, target: Pot
     """
     out = []
     for x in torch.chunk(samples, chunk, dim=0):
-        y, ladj = flow.t().call_and_ladj(x)
+        y, ladj = F.call_and_ladj(x)
         out.append(-target(y) + source(x) + ladj)
     return torch.cat(out, dim=0)
 

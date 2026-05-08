@@ -44,7 +44,7 @@ for epoch in range(EPOCH):
         idx = perm[start:start + BATCH]
         y_batch = y[idx]
 
-        loss = forward_KL(y_batch, source=u0, flow=flow)
+        loss = forward_KL(y_batch, source=u0, F=flow.t())
 
         optimizer.zero_grad()
         loss.backward()
