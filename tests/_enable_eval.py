@@ -28,7 +28,8 @@ We verify that:
 """
 
 import torch
-from zflows import Gaussian, langevin
+from zflows.potential import Gaussian
+from zflows.utils import langevin
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(0)

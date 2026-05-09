@@ -1,5 +1,6 @@
 import torch
-from zflows import Potential, Linear_Combination, langevin
+from zflows.potential import Potential, Linear_Combination
+from zflows.utils import langevin
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 torch.manual_seed(0)

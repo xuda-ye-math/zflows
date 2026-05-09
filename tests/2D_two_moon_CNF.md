@@ -30,7 +30,7 @@ $$
 \log |\det J_F(x)| = \int_0^1 \mathrm{tr}\bigl(\nabla_x v_\phi(x_t, t)\bigr)\, \mathrm{d}t,
 $$
 
-evaluated either *exactly* (an augmented ODE that costs $O(d)$ extra evaluations per step — `exact=True`, the default in `zflows.CNF`) or via the *Hutchinson trace estimator* (one extra ODE channel, unbiased but stochastic — `exact=False`). The integration uses an adaptive `dopri5` solver (Dormand–Prince 5(4)) under the hood with the user-specified `atol` / `rtol`.
+evaluated either *exactly* (an augmented ODE that costs $O(d)$ extra evaluations per step — `exact=True`, the default in `zflows.flow.CNF`) or via the *Hutchinson trace estimator* (one extra ODE channel, unbiased but stochastic — `exact=False`). The integration uses an adaptive `dopri5` solver (Dormand–Prince 5(4)) under the hood with the user-specified `atol` / `rtol`.
 
 The practical consequence is that *every* call to $F$ or $F^{-1}$ (forward sample, inverse sample, log-det) is one ODE integration with a data-dependent number of substeps — there is no closed-form alternative.
 

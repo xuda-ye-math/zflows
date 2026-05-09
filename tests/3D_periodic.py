@@ -3,8 +3,10 @@
 from pathlib import Path
 import math
 import torch
-from zflows import (NCSF, Potential, Uniform, reverse_KL, resample,
-        compute_ESS_log, rejuvenation, importance_weights_log, )
+from zflows.flow import NCSF
+from zflows.potential import Potential, Uniform
+from zflows.loss import reverse_KL
+from zflows.utils import resample, compute_ESS_log, rejuvenation, importance_weights_log
 
 HERE = Path(__file__).resolve().parent
 

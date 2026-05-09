@@ -1,6 +1,8 @@
 from pathlib import Path
 import torch
-from zflows import CNF, Gaussian, forward_KL
+from zflows.flow import CNF
+from zflows.potential import Gaussian
+from zflows.loss import forward_KL
 
 HERE = Path(__file__).resolve().parent
 

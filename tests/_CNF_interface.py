@@ -23,7 +23,7 @@ We verify that:
 
 import torch
 from zuko.transforms import ComposedTransform, FreeFormJacobianTransform
-from zflows import CNF, Flow
+from zflows.flow import CNF, Flow
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 torch.manual_seed(0)

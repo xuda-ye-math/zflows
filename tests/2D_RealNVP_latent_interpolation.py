@@ -3,7 +3,9 @@
 from pathlib import Path
 from itertools import combinations
 import torch
-from zflows import RealNVP, Gaussian, Gaussian_Mixture, forward_KL
+from zflows.flow import RealNVP
+from zflows.potential import Gaussian, Gaussian_Mixture
+from zflows.loss import forward_KL
 
 HERE = Path(__file__).resolve().parent
 

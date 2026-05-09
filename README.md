@@ -14,6 +14,8 @@ A small convenience wrapper around [zuko](https://github.com/probabilists/zuko) 
 **Flexible flow classes and hyperparameters, one unified interface.** Four flow classes are supported — **NSF** (Neural Spline Flow), **NCSF** (Neural *Circular* Spline Flow, for periodic / angular features), **CNF** (Continuous Normalizing Flow / FFJORD), and **RealNVP** (closed-form affine-coupling bijection on $\mathbb R^d$) — with the constructors
 
 ```python
+from zflows.flow import NSF, NCSF, CNF, RealNVP
+
 NSF(a, b, bins=8, slope=1e-3, transforms=4, hidden_features=(64, 64), activation=nn.SiLU)
 NCSF(a, b, bins=8, slope=1e-3, transforms=4, hidden_features=(64, 64), activation=nn.SiLU)
 CNF(dimension, frequency=3, exact=True, hidden_features=(64, 64), activation=nn.SiLU)
@@ -34,7 +36,15 @@ Swapping one flow class for another is a one-line change. Per-class hyperparamet
 **Precompiled gradients on `Potential`.** Any subclass of `Potential` opts into a `torch.compile`-compiled `vmap(grad(u))` with a single call:
 
 ```python
-u = Potential_U().to(device).enable_grad()
+from zflows.potential import Potential
+
+class U(Potential): # user-defined potential class
+    def __init__(self):
+        super().__init__()
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return ...
+
+u = U().to(device).enable_grad()
 g = u.grad(x) # x: [N, d] -> g: [N, d], no requires_grad_ on x needed
 ```
 
@@ -45,11 +55,13 @@ The gradient closure is built once, cached on the instance, and reused every cal
 **SMC-style utilities.** Direct-call building blocks for the *propose → reweight → resample → rejuvenate* loop:
 
 ```python
+from zflows.utils import importance_weights, resample, langevin, compute_ESS, compute_CESS
+
 importance_weights(samples, source, target, F, chunk=1)   # log w = -target(F(x)) + source(x) + log|det J_F|
-resample(samples, weights)                                 # multinomial resampling with replacement
+resample(samples, weights)                                # multinomial resampling with replacement
 langevin(samples, potential, step, iters, adjust=False, chunk=1) # alias: rejuvenation; adjust=True -> MALA
-compute_ESS(weights)                                       # importance-sampling diagnostic
-compute_CESS(source_weights, importance_weights)           # conditional ESS diagnostic
+compute_ESS(weights)                                      # importance-sampling diagnostic
+compute_CESS(source_weights, importance_weights)          # conditional ESS diagnostic
 ```
 
 `chunk` splits the batch along dim 0 to bound peak VRAM (statistically equivalent to `chunk=1`).
@@ -77,6 +89,17 @@ pip install -e .
 
 ```bash
 python -c "import zflows; print(zflows.__doc__)"
+```
+
+**Importing.** Use the four submodules `flow`, `potential`, `loss`, `utils`, and call `help(foo_name)` to read the documents. For example:
+
+```python
+from zflows.flow import NSF, RealNVP
+from zflows.potential import Potential, Gaussian
+from zflows.loss import reverse_KL, forward_KL
+from zflows.utils import importance_weights, compute_ESS, resample, langevin
+
+help(NSF)
 ```
 
 **Uninstall.**

@@ -6,10 +6,10 @@ os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "0")
 os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1") # cleaner logs
 
 import torch
-from zflows import (
-    Potential, Gaussian, NSF, Linear_Combination, reverse_KL,
-    compute_ESS_log, resample, rejuvenation, importance_weights_log,
-)
+from zflows.potential import Potential, Gaussian, Linear_Combination
+from zflows.flow import NSF
+from zflows.loss import reverse_KL
+from zflows.utils import compute_ESS_log, resample, rejuvenation, importance_weights_log
 
 HERE = Path(__file__).resolve().parent
 

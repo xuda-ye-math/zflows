@@ -1,6 +1,9 @@
 from pathlib import Path
 import torch
-from zflows import NSF, Potential, Gaussian, compute_ESS_log, reverse_KL
+from zflows.flow import NSF
+from zflows.potential import Potential, Gaussian
+from zflows.utils import compute_ESS_log
+from zflows.loss import reverse_KL
 
 HERE = Path(__file__).resolve().parent
 
