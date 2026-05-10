@@ -25,13 +25,16 @@ RealNVP(dimension, transforms=4, randmask=False, hidden_features=(64, 64), activ
 all subclassing the same `Flow` [abstract class](https://docs.python.org/3/library/abc.html) (`nn.Module` + `abc.ABC`):
 
 ```python
+from zflows.flow import NSF
+
 flow = NSF(...) # or NCSF(...), CNF(...), RealNVP(...)
-F = flow.t() # bijection
+flow.zeros() # set to identity
+F = flow.t() # flow map
 y, ladj = F.call_and_ladj(x) # forward & log|det J|
 x_back = F.inv(y) # inverse
 ```
 
-Swapping one flow class for another is a one-line change. Per-class hyperparameters are documented in [`flow.py`](zflows/flow.py).
+Swapping one flow class for another is a one-line change. Per-class hyperparameters are documented in [`flow.py`](zflows/flow.py). Every flow class also exposes `flow.zeros()`, which initialises the network so that the flow map is exactly the identity.
 
 **Precompiled gradients on `Potential`.** Any subclass of `Potential` opts into a `torch.compile`-compiled `vmap(grad(u))` with a single call:
 

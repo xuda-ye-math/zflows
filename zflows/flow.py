@@ -1,4 +1,4 @@
-# pyright: reportOperatorIssue=false, reportArgumentType=false, reportAttributeAccessIssue=false
+# pyright: reportOperatorIssue=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportGeneralTypeIssues=false, reportIndexIssue=false
 
 from abc import ABC, abstractmethod
 from functools import partial
@@ -130,6 +130,16 @@ class NSF(Flow, MAF):
             AffineTransform(loc=self.center, scale=self.halfwidth),
         )
 
+    def zeros(self):
+        """
+        Initialize the flow to the identity by zeroing the last layer of
+        each conditioner MLP.
+        """
+        for t in self.transform.transforms:
+            last = t.hyper[-1]
+            nn.init.zeros_(last.weight)
+            nn.init.zeros_(last.bias)
+
 class NCSF(Flow, MAF):
     """
     Neural Circular Spline Flow whose transform is a bijection on the
@@ -211,7 +221,17 @@ class NCSF(Flow, MAF):
             inner,
             AffineTransform(loc=self.center, scale=self.halfwidth / torch.pi),
         )
-    
+
+    def zeros(self):
+        """
+        Initialize the flow to the identity by zeroing the last layer of
+        each conditioner MLP.
+        """
+        for t in self.transform.transforms:
+            last = t.hyper[-1]
+            nn.init.zeros_(last.weight)
+            nn.init.zeros_(last.bias)
+
 class CNF(Flow):
     """
     Continuous normalizing flow (CNF) with a free-form Jacobian (FFJORD).
@@ -289,6 +309,16 @@ class CNF(Flow):
         """
         return ComposedTransform(self._ffj())
 
+    def zeros(self):
+        """
+        Initialize the flow to the identity by zeroing the last layer of
+        the ODE-drift MLP. With drift = 0, the ODE integrates to
+        x(1) = x(0) and log|det J| = 0.
+        """
+        last = self._ffj.ode[-1]
+        nn.init.zeros_(last.weight)
+        nn.init.zeros_(last.bias)
+
 class RealNVP(Flow):
     """
     Affine-coupling normalizing flow (RealNVP, Dinh et al. 2016).
@@ -356,3 +386,14 @@ class RealNVP(Flow):
         .call_and_ladj(x) -> (y, log|det J|).
         """
         return ComposedTransform(*[c() for c in self._coupling])
+
+    def zeros(self):
+        """
+        Initialize the flow to the identity by zeroing the last layer of
+        each coupling-conditioner MLP. With (shift, scale) = (0, 0), each
+        MonotonicAffineTransform reduces to x -> x.
+        """
+        for c in self._coupling:
+            last = c.hyper[-1]
+            nn.init.zeros_(last.weight)
+            nn.init.zeros_(last.bias)
