@@ -16,10 +16,10 @@ A small convenience wrapper around [zuko](https://github.com/probabilists/zuko) 
 ```python
 from zflows.flow import NSF, NCSF, CNF, RealNVP
 
-NSF(a, b, bins=8, slope=1e-3, transforms=4, hidden_features=(64, 64), activation=nn.SiLU)
-NCSF(a, b, bins=8, slope=1e-3, transforms=4, hidden_features=(64, 64), activation=nn.SiLU)
-CNF(dimension, frequency=3, exact=True, hidden_features=(64, 64), activation=nn.SiLU)
-RealNVP(dimension, transforms=4, randmask=False, hidden_features=(64, 64), activation=nn.SiLU)
+NSF(a=[0.0, 0.0], b=[1.0, 1.0], bins=8, slope=1e-3, transforms=4, hidden_features=(64, 64), activation=nn.SiLU)
+NCSF(a=[-1.0, -1.0], b=[1.0, 1.0], bins=8, slope=1e-3, transforms=4, hidden_features=(64, 64), activation=nn.SiLU)
+CNF(dimension=8, frequency=3, exact=True, hidden_features=(64, 64), activation=nn.SiLU)
+RealNVP(dimension=8, transforms=4, randmask=False, hidden_features=(64, 64), activation=nn.SiLU)
 ```
 
 all subclassing the same `Flow` [abstract class](https://docs.python.org/3/library/abc.html) (`nn.Module` + `abc.ABC`):
