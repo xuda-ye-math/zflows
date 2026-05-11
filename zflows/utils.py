@@ -164,12 +164,22 @@ def resample(samples: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     idx = torch.multinomial(probs, N, replacement=True)
     return samples[idx]
 
-def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, iters: int = 100, adjust: bool = False, chunk: int = 1) -> torch.Tensor:
+def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, iters: int = 100, adjust: bool = False, taming: float = 0, chunk: int = 1) -> torch.Tensor:
     """
     Langevin dynamics targeting the distribution exp(-U(x)).
 
     Proposal (Euler-Maruyama on the overdamped Langevin SDE):
         y = x - step * grad U(x) + sqrt(2 * step) * xi,   xi ~ N(0, I_d).
+
+    When `taming > 0`, the raw drift grad U(x) is replaced with the tamed
+    gradient
+        G(x) = grad U(x) / (1 + taming * ||grad U(x)||),
+    so that ||taming * G(x)|| <= 1. This stabilizes ULA on targets whose
+    |grad U| grows super-linearly (polynomial-tail energies), where plain
+    ULA can explode on outlier particles, and reduces to standard ULA in
+    the bulk (taming * ||grad U|| << 1). Tamed drift is incompatible with
+    adjust=True, since the MH correction below assumes the Gaussian
+    proposal centred on x - step * grad U(x).
 
     With adjust=False (default), every proposal is accepted; this is the
     unadjusted Langevin algorithm (ULA), which has an O(step) bias but
@@ -198,6 +208,10 @@ def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, it
         step:      float           Euler-Maruyama step size
         iters:     int             number of Langevin steps
         adjust:    bool            if True, run MALA (unbiased); if False, run ULA
+        taming:    float           if > 0, use tamed drift
+                                   grad U(x) / (1 + taming * ||grad U(x)||).
+                                   Stabilizes ULA on super-linearly growing
+                                   potentials. Not compatible with adjust=True.
         chunk:     int             split `samples` along dim 0 into this many
                                    chunks and run the trajectories sequentially.
                                    Reduces peak GPU memory at the cost of wall
@@ -213,6 +227,8 @@ def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, it
             f"langevin() requires gradients on the potential; "
             f"call {type(potential).__name__}.enable_grad() before passing it in."
         )
+    if adjust and taming > 0:
+        raise ValueError("langevin(): adjust=True and taming>0 are mutually exclusive.")
     # MALA accept/reject needs U(x), U(y); use the compiled fast path if
     # the user has opted in via .enable_eval(), else fall back to __call__.
     U = potential.eval if potential._eval_fn is not None else potential
@@ -221,7 +237,8 @@ def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, it
     for x in torch.chunk(samples, chunk, dim=0):
         for _ in range(iters):
             gx = potential.grad(x)
-            y = x - step * gx + noise_scale * torch.randn_like(x)
+            drift = gx / (1 + taming * gx.norm(dim=-1, keepdim=True)) if taming > 0 else gx
+            y = x - step * drift + noise_scale * torch.randn_like(x)
             if adjust:
                 # log q(z|w) = -||z - w + step * grad U(w)||^2 / (4 * step) + const
                 # Consume gx (-> log_q_yx) BEFORE calling potential.grad(y)
