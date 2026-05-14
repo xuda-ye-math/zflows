@@ -164,6 +164,116 @@ def resample(samples: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     idx = torch.multinomial(probs, N, replacement=True)
     return samples[idx]
 
+def lbfgs(samples: torch.Tensor, potential: Potential, step: float = 1.0, iters: int = 100, memory: int = 6, chunk: int = 1) -> torch.Tensor:
+    """
+    Batched L-BFGS for mode-finding / MAP refinement on the target
+    exp(-U(x)). Every particle in `samples` carries its own (s, y)
+    history and they all step in lockstep through vectorised tensor
+    ops, so N=2000 particles optimise as cheaply as one (modulo
+    per-row arithmetic). Exposed in zflows.utils both as `lbfgs` and as
+    the `optimization` alias (which is the default mode-finder).
+
+    L-BFGS builds a rank-`memory` approximation of the inverse Hessian
+    from the last `memory` gradient differences, giving superlinear
+    convergence on smooth potentials. It typically reaches near-machine
+    precision in a few iterations per effective curvature direction,
+    well-conditioned or not -- contrast with Adam-style sign descent,
+    which is O(init_err / step) just to reach the basin.
+
+    Algorithm, per iteration:
+      1. Two-loop recursion: combine the current gradient g_k with the
+         stored pairs (s_i, y_i) = (x_{i+1} - x_i, g_{i+1} - g_i) to get
+         the search direction d_k = -H_k^{-1} g_k, where
+            H_0^k = gamma_k * I,
+            gamma_k = (s_last^T y_last) / (y_last^T y_last)   (= 1 when
+                                                                empty).
+      2. Update x_{k+1} = x_k + step * d_k. No line search: `step` is a
+         fixed multiplier on the L-BFGS direction (step=1.0 is the pure
+         Newton step under the BFGS approximation; reduce for stability
+         on stiff or strongly non-convex regions).
+      3. Evaluate g_{k+1} = grad U(x_{k+1}). Curvature pair (s, y) is
+         appended; if more than `memory` pairs are stored, the oldest
+         is dropped. Per particle, pairs that violate the BFGS
+         curvature condition s^T y > 0 are kept in the history but with
+         rho_i = 0, which makes the two-loop recursion ignore them.
+         This preserves full batch vectorisation (no per-particle
+         history-length divergence).
+
+    The `potential.grad` fast path is compiled with reduce-overhead,
+    so its output is a static buffer that gets overwritten on the next
+    call. We `.clone()` after each grad call so that the previous g
+    survives long enough to form y = g_new - g_old. (Same hazard as
+    `langevin`'s "consume gx before potential.grad(y)" comment, just
+    handled differently here.)
+
+    Requires `potential.enable_grad()` to have been called so that
+    `potential.grad(x)` is available; otherwise raises RuntimeError.
+
+    Input:
+        samples:   Tensor [N, d]   initial particles
+        potential: Potential       target potential U; must support .grad(x)
+        step:      float           multiplier on the L-BFGS direction.
+                                   1.0 = pure Newton step; reduce
+                                   (e.g. 0.5, 0.1) if you see overshoot.
+        iters:     int             number of L-BFGS iterations
+        memory:    int             curvature pairs (s, y) kept per
+                                   particle (Nocedal's `m`). Typical 3-20;
+                                   larger = better Hessian approximation
+                                   and more memory (N * d * 2 * memory floats).
+        chunk:     int             split `samples` along dim 0 into this
+                                   many chunks and run sequentially.
+                                   Reduces peak GPU memory at the cost of
+                                   wall time; statistically equivalent to
+                                   chunk=1 (each particle's history is
+                                   independent, and there is no noise).
+    Output:
+        samples: Tensor [N, d]   particles after `iters` L-BFGS updates
+    """
+    if potential._grad_fn is None:
+        raise RuntimeError(
+            f"lbfgs() requires gradients on the potential; "
+            f"call {type(potential).__name__}.enable_grad() before passing it in."
+        )
+    out = []
+    for x in torch.chunk(samples, chunk, dim=0):
+        history: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        # clone(): potential.grad uses torch.compile reduce-overhead, so its
+        # output is a static buffer that the next .grad() call overwrites.
+        g = potential.grad(x).clone()
+        for _ in range(iters):
+            # Two-loop recursion: r approximates H_k^{-1} g
+            q = g
+            alphas = []
+            for s_i, y_i, rho_i in reversed(history):
+                a_i = rho_i * (s_i * q).sum(dim=-1) # [N]
+                q = q - a_i.unsqueeze(-1) * y_i
+                alphas.append(a_i)
+            alphas.reverse() # chronological order
+            if history:
+                s_last, y_last, _ = history[-1]
+                gamma = (s_last * y_last).sum(dim=-1) / (y_last ** 2).sum(dim=-1).clamp(min=1e-10) # [N]
+            else:
+                gamma = x.new_ones(x.shape[0])
+            r = gamma.unsqueeze(-1) * q
+            for (s_i, y_i, rho_i), a_i in zip(history, alphas):
+                beta_i = rho_i * (y_i * r).sum(dim=-1)
+                r = r + (a_i - beta_i).unsqueeze(-1) * s_i
+            # Step (no line search)
+            x_new = x - step * r
+            g_new = potential.grad(x_new).clone() # clone for same static-buffer reason
+            # Store curvature pair; mask out particles that violate s^T y > 0
+            s_new = x_new - x
+            y_new = g_new - g
+            ys = (s_new * y_new).sum(dim=-1) # [N]
+            rho_new = torch.where(ys > 1e-10, 1.0 / ys, ys.new_zeros(ys.shape))
+            history.append((s_new, y_new, rho_new))
+            if len(history) > memory:
+                history.pop(0)
+            x, g = x_new, g_new
+        out.append(x)
+    return torch.cat(out, dim=0)
+
+
 def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, iters: int = 100, adjust: bool = False, taming: float = 0, chunk: int = 1) -> torch.Tensor:
     """
     Langevin dynamics targeting the distribution exp(-U(x)).
@@ -252,6 +362,9 @@ def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, it
                 x = y
         out.append(x)
     return torch.cat(out, dim=0)
+
+# alias: L-BFGS is the default mode-finder / MAP-refinement routine in zflows
+optimization = lbfgs
 
 # alias: in SMC literature, Langevin steps are the standard "rejuvenation" move
 rejuvenation = langevin
