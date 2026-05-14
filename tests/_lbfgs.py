@@ -21,7 +21,11 @@ We verify:
      history is independent of batch composition).
   4. lbfgs() raises a clear RuntimeError if enable_grad() was not
      called.
-  5. `optimization` and `lbfgs` are the same function (alias check).
+  5. armijo=True is a working drop-in alternative to the line-search-
+     free update: converges to the basin on the same problems, requires
+     enable_eval() (raises if missing), and never increases U across
+     iterations (Armijo sufficient-decrease).
+  6. `optimization` and `lbfgs` are the same function (alias check).
 """
 
 import torch
@@ -120,11 +124,58 @@ assert raised, "lbfgs() must raise without enable_grad()"
 print("PASSED")
 
 # ----------------------------------------------------------------------
-# Test 5: `optimization` is the same callable as `lbfgs`
+# Test 5: armijo=True converges, requires enable_eval, never increases U
 # ----------------------------------------------------------------------
 print()
 print("=" * 60)
-print("Test 5: optimization is an alias of lbfgs")
+print("Test 5: armijo line search -- convergence + preconditions")
+print("=" * 60)
+
+# (5a) armijo=True without enable_eval() must raise
+u5_noeval = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device).enable_grad()
+x0 = torch.randn(8, 2, device=device)
+raised = False
+try:
+    lbfgs(x0, potential=u5_noeval, step=1.0, iters=5, memory=6, armijo=True)
+except RuntimeError as e:
+    raised = True
+    print(f"  no-enable_eval raised: {e}")
+assert raised, "lbfgs(armijo=True) must raise without enable_eval()"
+
+# (5b) with enable_eval(), armijo converges on the well-conditioned Gaussian
+x_star5 = torch.tensor([2.0, -1.5, 0.7], device=device)
+u5 = Gaussian(mean=x_star5.tolist(), variance=[1.0, 1.0, 1.0]).to(device).enable_grad().enable_eval()
+
+torch.manual_seed(15)
+x0 = torch.randn(2000, 3, device=device) * 5.0
+y_arm = lbfgs(x0, potential=u5, step=1.0, iters=30, memory=6, armijo=True)
+err_arm = (y_arm - x_star5).norm(dim=-1).max().item()
+print(f"armijo=True ({30:3d} iters) max ||y - x*||: {err_arm:.3e}")
+assert err_arm < 1e-4, f"armijo L-BFGS failed to converge: {err_arm}"
+
+# (5c) armijo guarantees U does not increase across iterations.
+# Walk one iter at a time, comparing mean U(x) before/after.
+torch.manual_seed(15)
+x = torch.randn(256, 3, device=device) * 5.0
+U_prev = u5.eval(x).mean().item()
+worst_increase = 0.0
+for k in range(20):
+    x = lbfgs(x, potential=u5, step=1.0, iters=1, memory=6, armijo=True)
+    U_now = u5.eval(x).mean().item()
+    worst_increase = max(worst_increase, U_now - U_prev)
+    U_prev = U_now
+print(f"worst U_after - U_before across 20 single-iter steps: {worst_increase:.3e}")
+# Armijo guarantees sufficient decrease; the worst increase should be <= 0
+# up to fp32 noise.
+assert worst_increase <= 1e-4, f"armijo allowed U to grow by {worst_increase}"
+print("PASSED")
+
+# ----------------------------------------------------------------------
+# Test 6: `optimization` is the same callable as `lbfgs`
+# ----------------------------------------------------------------------
+print()
+print("=" * 60)
+print("Test 6: optimization is an alias of lbfgs")
 print("=" * 60)
 print(f"optimization is lbfgs: {optimization is lbfgs}")
 assert optimization is lbfgs, "optimization should be the lbfgs symbol itself, not a wrapper"

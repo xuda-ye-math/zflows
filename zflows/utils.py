@@ -164,7 +164,7 @@ def resample(samples: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     idx = torch.multinomial(probs, N, replacement=True)
     return samples[idx]
 
-def lbfgs(samples: torch.Tensor, potential: Potential, step: float = 1.0, iters: int = 100, memory: int = 6, chunk: int = 1) -> torch.Tensor:
+def lbfgs(samples: torch.Tensor, potential: Potential, step: float = 1.0, iters: int = 100, memory: int = 6, armijo: bool = False, chunk: int = 1) -> torch.Tensor:
     """
     Batched L-BFGS for mode-finding / MAP refinement on the target
     exp(-U(x)). Every particle in `samples` carries its own (s, y)
@@ -187,10 +187,23 @@ def lbfgs(samples: torch.Tensor, potential: Potential, step: float = 1.0, iters:
             H_0^k = gamma_k * I,
             gamma_k = (s_last^T y_last) / (y_last^T y_last)   (= 1 when
                                                                 empty).
-      2. Update x_{k+1} = x_k + step * d_k. No line search: `step` is a
-         fixed multiplier on the L-BFGS direction (step=1.0 is the pure
-         Newton step under the BFGS approximation; reduce for stability
-         on stiff or strongly non-convex regions).
+      2. Update x_{k+1} = x_k + alpha_k * d_k. Two step-size policies:
+           - `armijo=False` (default): no line search, alpha_k = step
+             always. Newton-style update under the BFGS approximation.
+             Fast, but can overshoot in non-convex regions or on the
+             very first iteration (empty history, d = -g can be huge).
+           - `armijo=True`: per-particle masked Armijo backtracking.
+             Start with alpha = step, halve until each particle's
+             trial satisfies the Armijo sufficient-decrease condition
+                U(x + alpha * d) <= U(x) + C1 * alpha * (d . g),
+             where C1 = 1e-4. All particles run K_MAX = 6 trials in
+             lockstep through batched U evaluations; a per-particle
+             `done` mask freezes alpha as soon as Armijo is satisfied.
+             Particles that never satisfy Armijo within K_MAX trials
+             take the smallest tested step (very conservative fallback).
+             Cost per L-BFGS iter: 1 batched .grad() + K_MAX batched
+             .eval() calls. `armijo=True` therefore requires
+             `potential.enable_eval()`.
       3. Evaluate g_{k+1} = grad U(x_{k+1}). Curvature pair (s, y) is
          appended; if more than `memory` pairs are stored, the oldest
          is dropped. Per particle, pairs that violate the BFGS
@@ -199,27 +212,40 @@ def lbfgs(samples: torch.Tensor, potential: Potential, step: float = 1.0, iters:
          This preserves full batch vectorisation (no per-particle
          history-length divergence).
 
-    The `potential.grad` fast path is compiled with reduce-overhead,
-    so its output is a static buffer that gets overwritten on the next
-    call. We `.clone()` after each grad call so that the previous g
-    survives long enough to form y = g_new - g_old. (Same hazard as
-    `langevin`'s "consume gx before potential.grad(y)" comment, just
-    handled differently here.)
+    The `potential.grad` and `potential.eval` fast paths are compiled
+    with reduce-overhead, so their outputs are static buffers that get
+    overwritten on the next call. We `.clone()` after each grad call so
+    that the previous g survives long enough to form y = g_new - g_old,
+    and similarly for the cached U(x) value carried across iterations
+    when armijo=True. (Same hazard as `langevin`'s "consume gx before
+    potential.grad(y)" comment.)
 
-    Requires `potential.enable_grad()` to have been called so that
-    `potential.grad(x)` is available; otherwise raises RuntimeError.
+    Requires `potential.enable_grad()`; with `armijo=True`, also
+    requires `potential.enable_eval()`. Either missing -> RuntimeError.
 
     Input:
         samples:   Tensor [N, d]   initial particles
         potential: Potential       target potential U; must support .grad(x)
+                                   (and .eval(x) when armijo=True)
         step:      float           multiplier on the L-BFGS direction.
-                                   1.0 = pure Newton step; reduce
-                                   (e.g. 0.5, 0.1) if you see overshoot.
+                                   With armijo=False: fixed per-iter step.
+                                   With armijo=True: initial trial alpha
+                                   for the backtracking line search.
+                                   1.0 ~ pure Newton step; reduce
+                                   (e.g. 0.5, 0.1) for stiff problems.
         iters:     int             number of L-BFGS iterations
         memory:    int             curvature pairs (s, y) kept per
                                    particle (Nocedal's `m`). Typical 3-20;
                                    larger = better Hessian approximation
                                    and more memory (N * d * 2 * memory floats).
+        armijo:    bool            if True, enable masked Armijo
+                                   backtracking line search. Adds K_MAX
+                                   compiled forward passes per iteration
+                                   but guarantees sufficient decrease of
+                                   U at every accepted step. Use it when
+                                   the line-search-free update is
+                                   unstable (first-iter blow-up, very
+                                   non-convex landscapes).
         chunk:     int             split `samples` along dim 0 into this
                                    many chunks and run sequentially.
                                    Reduces peak GPU memory at the cost of
@@ -234,12 +260,20 @@ def lbfgs(samples: torch.Tensor, potential: Potential, step: float = 1.0, iters:
             f"lbfgs() requires gradients on the potential; "
             f"call {type(potential).__name__}.enable_grad() before passing it in."
         )
+    if armijo and potential._eval_fn is None:
+        raise RuntimeError(
+            f"lbfgs(armijo=True) needs the compiled forward fast path; "
+            f"call {type(potential).__name__}.enable_eval() before passing it in."
+        )
+    C1, SHRINK, K_MAX = 1e-4, 0.5, 6
     out = []
     for x in torch.chunk(samples, chunk, dim=0):
         history: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
-        # clone(): potential.grad uses torch.compile reduce-overhead, so its
-        # output is a static buffer that the next .grad() call overwrites.
+        # clone(): potential.grad / potential.eval use torch.compile
+        # reduce-overhead, so each call's output is a static buffer that
+        # the next call overwrites. Clone anything we need across calls.
         g = potential.grad(x).clone()
+        U_x = potential.eval(x).clone() if armijo else None
         for _ in range(iters):
             # Two-loop recursion: r approximates H_k^{-1} g
             q = g
@@ -258,8 +292,27 @@ def lbfgs(samples: torch.Tensor, potential: Potential, step: float = 1.0, iters:
             for (s_i, y_i, rho_i), a_i in zip(history, alphas):
                 beta_i = rho_i * (y_i * r).sum(dim=-1)
                 r = r + (a_i - beta_i).unsqueeze(-1) * s_i
-            # Step (no line search)
-            x_new = x - step * r
+            if armijo:
+                # Masked Armijo backtracking: per-particle alpha, all
+                # particles run K_MAX trials in lockstep.
+                d = -r # search direction
+                dg = (d * g).sum(dim=-1) # [N], < 0 for descent direction
+                alpha = x.new_full((x.shape[0],), step)
+                done = x.new_zeros(x.shape[0], dtype=torch.bool)
+                for _ in range(K_MAX):
+                    x_trial = x + alpha.unsqueeze(-1) * d
+                    U_trial = potential.eval(x_trial)
+                    ok = U_trial <= U_x + C1 * alpha * dg # [N] bool
+                    done = done | ok
+                    alpha = torch.where(done, alpha, alpha * SHRINK)
+                # After the loop, x_trial = x + alpha_final * d encodes
+                # "accepted alpha" for done particles (alpha was frozen
+                # at acceptance) and "smallest fallback alpha" otherwise.
+                x_new = x_trial
+                U_x_new = U_trial.clone() # carry to next iter as U_x
+            else:
+                x_new = x - step * r
+                U_x_new = None
             g_new = potential.grad(x_new).clone() # clone for same static-buffer reason
             # Store curvature pair; mask out particles that violate s^T y > 0
             s_new = x_new - x
@@ -270,6 +323,8 @@ def lbfgs(samples: torch.Tensor, potential: Potential, step: float = 1.0, iters:
             if len(history) > memory:
                 history.pop(0)
             x, g = x_new, g_new
+            if armijo:
+                U_x = U_x_new
         out.append(x)
     return torch.cat(out, dim=0)
 
