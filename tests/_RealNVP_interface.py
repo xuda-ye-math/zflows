@@ -27,9 +27,8 @@ We verify that:
 """
 
 import torch
-from zuko.transforms import ComposedTransform
 from zuko.flows.coupling import RealNVP as ZukoRealNVP
-from zflows.flow import RealNVP, Flow
+from zflows.flow import RealNVP, Flow, ComposedTransform
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 

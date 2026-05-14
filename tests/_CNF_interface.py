@@ -22,8 +22,8 @@ We verify that:
 """
 
 import torch
-from zuko.transforms import ComposedTransform, FreeFormJacobianTransform
-from zflows.flow import CNF, Flow
+from zuko.transforms import FreeFormJacobianTransform
+from zflows.flow import CNF, Flow, ComposedTransform
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 torch.manual_seed(0)

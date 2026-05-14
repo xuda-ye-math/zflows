@@ -1,7 +1,7 @@
 # pyright: reportOperatorIssue=false, reportArgumentType=false, reportAttributeAccessIssue=false
 
 import torch
-from zuko.transforms import ComposedTransform
+from .flow import ComposedTransform
 from .potential import Potential
 
 def source_KL_F(x: torch.Tensor, target: Potential, F: ComposedTransform):

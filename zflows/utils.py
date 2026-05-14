@@ -1,7 +1,7 @@
 # pyright: reportOperatorIssue=false
 
 import torch
-from zuko.transforms import ComposedTransform
+from .flow import ComposedTransform
 from .potential import Potential
 
 def compute_ESS(weights: torch.Tensor) -> torch.Tensor:
