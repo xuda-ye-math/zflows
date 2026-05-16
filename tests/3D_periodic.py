@@ -3,6 +3,10 @@
 from pathlib import Path
 import math
 import torch
+import os
+os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "0")
+os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1") # cleaner logs
+
 from zflows.flow import NCSF
 from zflows.potential import Potential, Uniform
 from zflows.loss import reverse_KL
