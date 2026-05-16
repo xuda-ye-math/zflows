@@ -288,3 +288,20 @@ The two env vars don't change the warnings themselves; they prune the messages a
 You can see this in action in [`tests/3D_periodic.py`](tests/3D_periodic.py) and [`tests/_hmc.py`](tests/_hmc.py).
 
 </details>
+
+<details>
+<summary><strong>Q: Can I install <code>zflows</code> directly from PyPI with <code>pip install zflows</code>?</strong></summary>
+
+Not at the moment. The author has no immediate plan to ship `zflows` to PyPI because the API is still moving and long-term maintenance is not guaranteed — a PyPI release implies a stability promise the project cannot yet make. A PyPI release may happen in the future once the interface settles.
+
+For now, follow the local editable install in the [Installation](#installation) section:
+
+```bash
+git clone https://github.com/xuda-ye-math/zflows.git
+cd zflows
+pip install -e .
+```
+
+Once `pip install -e .` succeeds, the package is registered against your local clone, so you can safely delete the GitHub remote (or even the `.git` directory) and `import zflows` will keep working. If you do, remember that `pip uninstall zflows` followed by a fresh `pip install -e .` will still need the source tree on disk — keep the cloned folder around, you just don't need its git history.
+
+</details>
