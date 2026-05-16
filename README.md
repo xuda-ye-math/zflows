@@ -244,3 +244,47 @@ python -m tests.2D_RealNVP_latent_interpolation
 <p align="center"><img src="tests/2D_RealNVP_latent_interpolation.png" alt="2D RealNVP latent interpolation" width="700px"></p>
 
 </details>
+
+## FAQ
+
+<details>
+<summary><strong>Q: What platforms does <code>zflows</code> run on?</strong></summary>
+
+**Linux + NVIDIA GPU is required.** The package has been tested on **Ubuntu**, **Arch**, and **WSL** (Windows Subsystem for Linux); other major Linux distributions should work as well as long as a CUDA-enabled PyTorch build is available.
+
+Native Windows is **not** supported: `torch.compile` — the backbone of the `Potential.enable_grad` / `Potential.enable_eval` fast paths — does not run on Windows, see [pytorch/pytorch#167062](https://github.com/pytorch/pytorch/issues/167062). On Windows machines, either use [WSL](https://github.com/microsoft/WSL) (recommended) or avoid the `enable_grad` / `enable_eval` opt-ins entirely (you will then fall back to standard autograd for `Potential` gradients, which is slower but functionally equivalent).
+
+macOS is untested. The pure-Python flow / loss code should import and run on the CPU, but the compiled fast paths target CUDA and have not been exercised on Apple Silicon.
+
+</details>
+
+<details>
+<summary><strong>Q: I'm on Linux, but the first call to <code>enable_grad</code> / <code>enable_eval</code> fails with an error about not finding a C compiler. What's missing?</strong></summary>
+
+You need the **CUDA Toolkit** installed, not just the CUDA runtime that ships with the PyTorch wheel. `torch.compile` (used inside `Potential.enable_grad` / `Potential.enable_eval`) invokes Triton / TorchInductor, which JIT-compiles a small CUDA helper at first call — and that step requires the NVIDIA C/C++ compiler `nvcc` from the CUDA Toolkit. Without it, Triton has no compiler to drive and you see a "C compiler not found" (or "`nvcc` not found") error.
+
+Install the toolkit through your distro's package manager (e.g. `cuda-toolkit` on Ubuntu/Arch) or from [NVIDIA's downloads page](https://developer.nvidia.com/cuda-downloads), then make sure `nvcc --version` works from your shell before re-running.
+
+</details>
+
+<details>
+<summary><strong>Q: My runs print a wall of <code>_POSIX_C_SOURCE redefined</code> warnings from <code>cuda_utils.c</code>. How do I silence them?</strong></summary>
+
+Put these two lines at the very top of your script, **before** `import torch`:
+
+```python
+import os
+os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "0")
+os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")  # cleaner logs
+```
+
+These warnings come from the C compiler invoked by Triton / TorchInductor when `torch.compile` (used inside `Potential.enable_grad` / `Potential.enable_eval`) JIT-builds a CUDA helper. On some Linux distributions — typically those with a recent glibc (Arch, Fedora, etc.) — the system headers already define `_POSIX_C_SOURCE` at a higher level than the Python headers expect, so GCC emits a redefinition warning for every kernel autotuned and every compile thread. The warnings are harmless (the build succeeds and the kernel runs correctly), but they swamp the log.
+
+The two env vars don't change the warnings themselves; they prune the messages around them:
+
+- `TRITON_PRINT_AUTOTUNING=0` mutes Triton's per-kernel autotune banner that re-prints the compile output.
+- `TORCHINDUCTOR_COMPILE_THREADS=1` serializes the Inductor compile workers, so any remaining diagnostic is printed once instead of N times in interleaved chunks.
+
+You can see this in action in [`tests/3D_periodic.py`](tests/3D_periodic.py) and [`tests/_hmc.py`](tests/_hmc.py).
+
+</details>

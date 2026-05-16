@@ -6,7 +6,7 @@ Available names:
     zflows.loss      : reverse_KL, forward_KL
     zflows.utils     : compute_ESS, compute_ESS_log, compute_CESS, compute_CESS_log,
                        importance_weights, importance_weights_log,
-                       resample, langevin, rejuvenation, lbfgs, optimization
+                       resample, langevin, rejuvenation, hmc, lbfgs, optimization
 
 `ComposedTransform` is re-exported from zuko so downstream code can stay
 zuko-agnostic: write `from zflows.flow import ComposedTransform` rather

@@ -418,6 +418,128 @@ def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, it
         out.append(x)
     return torch.cat(out, dim=0)
 
+
+def hmc(samples: torch.Tensor, potential: Potential, step: float = 1e-2, iters: int = 10, burns: int = 10, chunk: int = 1) -> torch.Tensor:
+    """
+    Hamiltonian Monte Carlo (HMC) targeting the distribution exp(-U(x)).
+
+    Each "burn" performs a full HMC trajectory:
+      1. Resample momentum p ~ N(0, I_d) -- a complete, "high-temperature"
+         refresh that discards any correlation with the previous burn.
+      2. Integrate the Hamiltonian flow of H(x, p) = U(x) + 0.5 * ||p||^2
+         for `iters` leapfrog steps of size `step`.
+      3. Metropolis-Hastings accept/reject on the trajectory endpoint:
+            log_alpha = (U(x0) + 0.5 * ||p0||^2)
+                       - (U(x_end) + 0.5 * ||p_end||^2),
+            accept with probability min(1, exp(log_alpha)).
+         Leapfrog is exactly volume-preserving, so no Jacobian term enters.
+
+    Compared to MALA (`langevin(adjust=True)`), HMC pays
+    `iters + 1` gradient calls per MH decision instead of 2, but the
+    trajectory moves O(step * iters) per decision rather than O(sqrt(step)),
+    giving much lower autocorrelation at fixed acceptance.
+
+    "Safer" than ULA/MALA on stiff targets in two senses:
+      - The MH correction makes the stationary distribution exactly exp(-U),
+        with no O(step) bias to tune away.
+      - Divergent trajectories (NaN / inf energies from too-large leapfrog
+        steps in steep regions) produce non-finite log_alpha, which is
+        clamped to -inf so the particle reverts to its pre-trajectory
+        position. NaN coordinates never enter the returned tensor; the
+        worst a bad trajectory can do is waste compute on that burn.
+
+    GPU-parallel structure:
+      - Every particle in a chunk runs exactly `iters` leapfrog steps in
+        lockstep; per-particle decisions only happen at the MH accept mask
+        (`torch.where`), so the inner loop stays on one CUDA graph.
+      - Efficient leapfrog combines adjacent trailing/leading half-kicks,
+        costing `iters + 1` compiled grad calls per trajectory instead of
+        the naive 2 * iters.
+      - `potential.grad` and `potential.eval` use torch.compile
+        reduce-overhead, so their outputs are static buffers overwritten on
+        the next call. The leapfrog consumes each gradient before the next
+        .grad() call (no clone needed), but U_start must survive across the
+        leapfrog AND across the U_end .eval() call, so we .clone() it once.
+
+    Requires `potential.enable_grad()`. If `potential.enable_eval()` has
+    also been called, the U(x_start) / U(x_end) energies route through the
+    compiled fast path; otherwise they fall back to `potential(x)`.
+
+    Input:
+        samples:   Tensor [N, d]   initial particles
+        potential: Potential       target potential U; must support .grad(x)
+        step:      float           leapfrog step size epsilon. Tune so the
+                                   MH acceptance rate is ~0.6-0.8 (the HMC
+                                   sweet spot from Beskos et al. 2013).
+        iters:     int             number of leapfrog steps per trajectory.
+                                   Trajectory length L = step * iters; pick
+                                   L on the scale of the target's largest
+                                   correlation length. Larger trades grad
+                                   calls for lower autocorrelation.
+        burns:     int             number of momentum refreshes / MH
+                                   trajectories. Each burn fully redraws
+                                   p ~ N(0, I) (a "high-temperature" reset)
+                                   and runs one MH accept/reject decision.
+        chunk:     int             split `samples` along dim 0 into this
+                                   many chunks and run sequentially.
+                                   Reduces peak GPU memory at the cost of
+                                   wall time; statistically equivalent to
+                                   chunk=1 (each chunk uses its own
+                                   independent momentum and accept noise).
+    Output:
+        samples: Tensor [N, d]   particles after `burns` HMC trajectories
+    """
+    if potential._grad_fn is None:
+        raise RuntimeError(
+            f"hmc() requires gradients on the potential; "
+            f"call {type(potential).__name__}.enable_grad() before passing it in."
+        )
+    # MH accept/reject needs U(x_start), U(x_end); use the compiled fast
+    # path if the user has opted in via .enable_eval(), else fall back to
+    # __call__ (same convention as langevin).
+    U = potential.eval if potential._eval_fn is not None else potential
+    out = []
+    for x in torch.chunk(samples, chunk, dim=0):
+        for _ in range(burns):
+            x_start = x
+            p_start = torch.randn_like(x)
+            # clone(): U_start must survive across the leapfrog AND across
+            # the U_end .eval() call, which would otherwise overwrite the
+            # static buffer under reduce-overhead.
+            U_start = U(x_start).clone()
+            K_start = 0.5 * (p_start ** 2).sum(dim=-1) # [N]
+
+            # Efficient leapfrog: iters + 1 grad calls, combined half-kicks.
+            p = p_start
+            if iters >= 1:
+                g = potential.grad(x) # consumed before next .grad: no clone
+                p = p - 0.5 * step * g
+                for _ in range(iters - 1):
+                    x = x + step * p
+                    g = potential.grad(x)
+                    p = p - step * g
+                x = x + step * p
+                g = potential.grad(x)
+                p = p - 0.5 * step * g
+
+            U_end = U(x) # [N]
+            K_end = 0.5 * (p ** 2).sum(dim=-1) # [N]
+
+            # MH accept/reject with NaN guard: divergent trajectories
+            # produce non-finite log_alpha -> -inf -> reject -> revert to
+            # x_start, so the returned tensor is always finite.
+            log_alpha = (U_start + K_start) - (U_end + K_end) # [N]
+            log_alpha = torch.where(
+                torch.isfinite(log_alpha),
+                log_alpha,
+                log_alpha.new_full((), float("-inf")),
+            )
+            accept = torch.rand_like(log_alpha).log() < log_alpha # [N] bool
+            x = torch.where(accept.unsqueeze(-1), x, x_start)
+        out.append(x)
+    return torch.cat(out, dim=0)
+
+
 # alias: L-BFGS is the default mode-finder / MAP-refinement routine in zflows
 optimization = lbfgs
 
