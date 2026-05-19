@@ -1,6 +1,9 @@
-"""This package is a convenient wrapper of zuko for implementing normalizing flow.
+"""zflows — PyTorch normalizing flows for unconditional energy-based sampling.
 
-Available names:
+Strongly inspired by `zuko` (https://github.com/probabilists/zuko).
+
+Public surface:
+
     zflows.potential : Potential, Uniform, Gaussian, Gaussian_Mixture, Linear_Combination
     zflows.flow      : Flow, NSF, NCSF, CNF, RealNVP, ComposedTransform
     zflows.loss      : reverse_KL, forward_KL
@@ -8,7 +11,14 @@ Available names:
                        importance_weights, importance_weights_log,
                        resample, langevin, rejuvenation, hmc, lbfgs, optimization
 
-`ComposedTransform` is re-exported from zuko so downstream code can stay
-zuko-agnostic: write `from zflows.flow import ComposedTransform` rather
-than reaching into `zuko.transforms`.
+`ComposedTransform` lives in `zflows.core.transforms` and is re-exported
+from `zflows.flow` so downstream code stays implementation-agnostic.
+
+Internals (`zflows.core.*`) follow zuko's layout, with two deliberate
+divergences:
+
+    1. there is no `context` / conditional-on-c plumbing anywhere;
+    2. `MonotonicRQSTransform` / `CircularShiftTransform` accept a
+       per-coordinate `bound` tensor so spline knots can natively span
+       `[-bound_i, bound_i]` without an affine scaling sandwich.
 """

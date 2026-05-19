@@ -1,34 +1,48 @@
 # pyright: reportOperatorIssue=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportGeneralTypeIssues=false, reportIndexIssue=false
 
+"""Unconditional normalizing flows for energy-based sampling.
+
+Public API:
+    Flow              — abstract base; subclasses implement .t() -> ComposedTransform
+    NSF               — Neural Spline Flow on [a, b]^d (translation-sandwiched RQS)
+    NCSF              — Neural Circular Spline Flow on [a, b]^d (periodic per coord)
+    CNF               — Continuous Normalizing Flow on R^d (FFJORD)
+    RealNVP           — affine-coupling flow on R^d
+    ComposedTransform — re-exported from .core.transforms
+
+All flows assume context = 0, i.e. one fixed target. NSF and NCSF
+parameterise their inner spline on per-coordinate
+`[-halfwidth_i, halfwidth_i]` and wrap it with an additive
+translation by ±center_i (no scaling), so the box-bound geometry
+[a, b]^d is honoured without distorting the conditioner's dynamic
+range.
+"""
+
 from abc import ABC, abstractmethod
-from functools import partial
+
 import torch
 from torch import Tensor, nn
-from zuko.transforms import (
-    MonotonicRQSTransform, AffineTransform, ComposedTransform,
-)
-from zuko.flows import MAF
-from zuko.flows.spline import CircularRQSTransform
-from zuko.flows.continuous import FFJTransform
-from zuko.flows.coupling import GeneralCouplingTransform
 
-"""
-All Flow classes assume context=0, i.e. the normalizing flow is always
-unconditioned. The motivating use case is energy-based sampling, where
-the target distribution is fixed and accuracy on that single target
-matters more than the extra expressibility of a context-conditioned flow.
-"""
+from .core.flows import (
+    CircularRQSTransform,
+    FFJTransform,
+    GeneralCouplingTransform,
+    MaskedAutoregressiveTransform,
+)
+from .core.transforms import (
+    AdditiveTransform,
+    ComposedTransform,
+    MonotonicRQSTransform,
+)
+
+
 class Flow(nn.Module, ABC):
-    """
-    Abstract base class for every normalizing flow in zflows.
+    """Abstract base class for every normalizing flow in zflows.
 
     Subclasses inherit nn.Module machinery (.to(device), .parameters(),
     .state_dict(), .train()/.eval()) and must implement:
 
         def t(self) -> ComposedTransform: ...
-
-    Built-in implementations are NSF and NCSF; future CNF / RealNVP /
-    etc. classes should inherit from Flow and override t().
 
     Canonical usage:
 
@@ -36,34 +50,24 @@ class Flow(nn.Module, ABC):
         y, ladj = F.call_and_ladj(x)          # forward & log|det J|
         x_back  = F.inv(y)                    # inverse
 
-    Note: this is intentionally *different* from zuko's native interface
-    `F = flow().transform`. zuko's pattern routes through the conditioner-
-    aware `flow(context)` call, which is the right entry point for
-    conditional flows but adds a vestigial pair of parens for unconditional
-    ones. zflows commits to unconditional flows (see the module-level note
-    above), so `flow.t()` is the only supported access path. Do NOT call
-    `flow().transform` directly in zflows code — wrap any new Flow
-    implementation behind a `t()` method instead, so user code stays
-    uniform and the Flow contract holds.
+    `flow.t()` is the only supported access path; do not invoke any
+    internal `forward`/`__call__` directly.
     """
     @abstractmethod
     def t(self) -> ComposedTransform: ...
 
-class NSF(Flow, MAF):
-    """
-    Neural Spline Flow whose transform is a bijection on the rectangle
-    [a_1, b_1] x ... x [a_d, b_d].
 
-    Internally an MAF-RQS runs on the symmetric box [-1, 1]^d;
-    `t()` conjugates it by an affine to act on [a, b]^d:
+# ──────────────────────────────────────────────────────────────────────
+# NSF — Neural Spline Flow on [a, b]^d
+# ──────────────────────────────────────────────────────────────────────
 
-        x in [a, b]^d
-          --pre  affine: x -> (x - center) / half--> u in [-1, 1]^d
-          --MAF-RQS--------------------------------> v in [-1, 1]^d
-          --post affine: v -> center + half * v  --> y in [a, b]^d
+class NSF(Flow):
+    """Neural Spline Flow on [a_1, b_1] x ... x [a_d, b_d].
 
-    The pre/post affine Jacobians cancel, so the overall log|det J| equals
-    that of the inner MAF-RQS.
+    The MAF-RQS conditioner runs on the per-coord centred box
+    [-halfwidth_i, halfwidth_i]; t() sandwiches it with two
+    AdditiveTransform shifts by ±center_i. No scaling — log|det J| is
+    fully contributed by the inner spline.
 
     Arguments:
         a: lower corner of the box, shape (d,).
@@ -74,9 +78,7 @@ class NSF(Flow, MAF):
             features).
         slope: minimum slope of each spline segment in the monotonic RQS
             transform. Acts as a floor on the derivative to keep the
-            bijection strictly increasing and numerically stable; smaller
-            values allow sharper density variations but risk ill-conditioned
-            Jacobians, while larger values smooth the transform
+            bijection strictly increasing and numerically stable
             (recommend: 1e-3 to 1e-2).
         transforms: number of stacked autoregressive layers. Too few
             underfits multimodal targets; too many hurts optimization
@@ -90,193 +92,175 @@ class NSF(Flow, MAF):
     """
     def __init__(
         self,
-        a: Tensor | list[float], # (d,)  lower bounds
-        b: Tensor | list[float], # (d,)  upper bounds
+        a: Tensor | list[float],
+        b: Tensor | list[float],
         bins: int = 8,
         slope: float = 1e-3,
         transforms: int = 4,
         hidden_features: tuple[int, ...] = (64, 64),
-        activation: type[nn.Module] = nn.SiLU, # pass the class, not an instance
-    ):
+        activation: type[nn.Module] = nn.SiLU,
+    ) -> None:
+        super().__init__()
+
         if not isinstance(a, Tensor):
             a = torch.tensor(a, dtype=torch.float32)
         if not isinstance(b, Tensor):
             b = torch.tensor(b, dtype=torch.float32)
         assert a.shape == b.shape and a.ndim == 1
         d = a.size(0)
-        super().__init__(
-            features=d, context=0,
-            univariate=partial(MonotonicRQSTransform, bound=1.0, slope=slope),
-            shapes=[(bins,), (bins,), (bins - 1,)],
-            transforms=transforms,
-            hidden_features=hidden_features,
-            activation=activation,
-        )
+
         # Buffers move with .to(device) and are saved in state_dict.
-        self.register_buffer("a", a) # (d,)
-        self.register_buffer("b", b) # (d,)
-        self.register_buffer("center",    (a + b) / 2) # (d,)
-        self.register_buffer("halfwidth", (b - a) / 2) # (d,)
+        self.register_buffer("a", a)
+        self.register_buffer("b", b)
+        self.register_buffer("center", (a + b) / 2)
+        self.register_buffer("halfwidth", (b - a) / 2)
+        self.slope = slope
+
+        orders = [torch.arange(d), torch.arange(d).flip(0)]
+        self._maf = nn.ModuleList([
+            MaskedAutoregressiveTransform(
+                features=d,
+                univariate=self._univariate,
+                shapes=[(bins,), (bins,), (bins - 1,)],
+                order=orders[i % 2],
+                hidden_features=hidden_features,
+                activation=activation,
+            )
+            for i in range(transforms)
+        ])
+
+    def _univariate(self, *phi: Tensor):
+        # Resolve self.halfwidth lazily so .to(device) reassignment is
+        # picked up by every subsequent .t() call.
+        return MonotonicRQSTransform(*phi, bound=self.halfwidth, slope=self.slope)
 
     def t(self) -> ComposedTransform:
-        """
-        Bijection on [a, b]^d as a zuko ComposedTransform.
+        """Bijection on [a, b]^d as a ComposedTransform.
+
         Supports .inv and .call_and_ladj(x) -> (y, log|det J|).
         """
-        inner = self().transform # ComposedTransform on [-1, 1]^d
+        inner = ComposedTransform(*[m() for m in self._maf])
         return ComposedTransform(
-            AffineTransform(loc=-self.center / self.halfwidth, scale=1.0 / self.halfwidth),
+            AdditiveTransform(shift=-self.center),
             inner,
-            AffineTransform(loc=self.center, scale=self.halfwidth),
+            AdditiveTransform(shift= self.center),
         )
 
-    def zeros(self):
-        """
-        Initialize the flow to the identity by zeroing the last layer of
-        each conditioner MLP.
-        """
-        for t in self.transform.transforms:
-            last = t.hyper[-1]
+    def zeros(self) -> None:
+        """Initialize the flow to the identity by zeroing the last layer
+        of each conditioner MLP."""
+        for m in self._maf:
+            last = m.hyper[-1]
             nn.init.zeros_(last.weight)
             nn.init.zeros_(last.bias)
 
-class NCSF(Flow, MAF):
-    """
-    Neural Circular Spline Flow whose transform is a bijection on the
-    rectangle [a_1, b_1] x ... x [a_d, b_d], with each coordinate treated
-    as a periodic angle (defaults to [-pi, pi]^d).
 
-    Internally an MAF circular-RQS runs on the symmetric box [-pi, pi]^d;
-    `t()` conjugates it by an affine to act on [a, b]^d:
+# ──────────────────────────────────────────────────────────────────────
+# NCSF — Neural Circular Spline Flow on [a, b]^d
+# ──────────────────────────────────────────────────────────────────────
 
-        x in [a, b]^d
-          --pre  affine: x -> (x - center) * pi / half --> u in [-pi, pi]^d
-          --MAF circular-RQS-----------------------------> v in [-pi, pi]^d
-          --post affine: v -> center + half * v / pi   --> y in [a, b]^d
+class NCSF(Flow):
+    """Neural Circular Spline Flow on [a_1, b_1] x ... x [a_d, b_d],
+    each coordinate periodic with its own period b_i - a_i.
 
-    The pre/post affine Jacobians cancel, so the overall log|det J| equals
-    that of the inner MAF circular-RQS.
+    The MAF circular-RQS conditioner runs on the per-coord centred box
+    [-halfwidth_i, halfwidth_i]; t() sandwiches it with AdditiveTransform
+    shifts by ±center_i (no scaling). Default a = [-pi, ..., -pi],
+    b = [pi, ..., pi] reproduces the original NCSF on the d-torus.
 
     Arguments:
-        a: lower corner of the box, shape (d,) (default: [-pi, ..., -pi]).
-        b: upper corner of the box, shape (d,) (default: [ pi, ...,  pi]).
-        bins: number of spline knots per coordinate; more bins give finer
-            local detail at the cost of parameters and overfitting risk
-            (recommend: 8-16 for smooth densities, up to 32 for sharper
-            features).
-        slope: minimum slope of each spline segment in the monotonic RQS
-            transform. Acts as a floor on the derivative to keep the
-            bijection strictly increasing and numerically stable; smaller
-            values allow sharper density variations but risk ill-conditioned
-            Jacobians, while larger values smooth the transform
-            (recommend: 1e-3 to 1e-2).
-        transforms: number of stacked autoregressive layers. Too few
-            underfits multimodal targets; too many hurts optimization
-            (recommend: 4-6).
+        a: lower corner of the box, shape (d,) (typically -pi).
+        b: upper corner of the box, shape (d,) (typically  pi).
+        bins: number of spline knots per coordinate (recommend: 8-16).
+        slope: minimum slope of each spline segment (recommend: 1e-3 to 1e-2).
+        transforms: number of stacked autoregressive layers (recommend: 4-6).
         hidden_features: per-layer widths of the autoregressive conditioner
-            MLP. A mild bottleneck works well (recommend: (64, 64) or
-            (128, 64, 128); widen before deepening).
+            MLP (recommend: (64, 64) or (128, 64, 128)).
         activation: activation class (not instance) used inside the
-            conditioner MLP (recommend: nn.SiLU or nn.GELU for smooth
-            targets, nn.ReLU only when speed matters).
+            conditioner MLP (recommend: nn.SiLU or nn.GELU).
     """
     def __init__(
         self,
-        a: Tensor | list[float], # (d,)  lower bounds (default -pi)
-        b: Tensor | list[float], # (d,)  upper bounds (default  pi)
+        a: Tensor | list[float],
+        b: Tensor | list[float],
         bins: int = 8,
         slope: float = 1e-3,
         transforms: int = 4,
         hidden_features: tuple[int, ...] = (64, 64),
-        activation: type[nn.Module] = nn.SiLU, # pass the class, not an instance
-    ):
+        activation: type[nn.Module] = nn.SiLU,
+    ) -> None:
+        super().__init__()
+
         if not isinstance(a, Tensor):
             a = torch.tensor(a, dtype=torch.float32)
         if not isinstance(b, Tensor):
             b = torch.tensor(b, dtype=torch.float32)
         assert a.shape == b.shape and a.ndim == 1
         d = a.size(0)
-        super().__init__(
-            features=d, context=0,
-            univariate=partial(CircularRQSTransform, slope=slope),
-            shapes=[(bins,), (bins,), (bins - 1,)],
-            transforms=transforms,
-            hidden_features=hidden_features,
-            activation=activation,
-        )
-        # Buffers move with .to(device) and are saved in state_dict.
-        self.register_buffer("a", a) # (d,)
-        self.register_buffer("b", b) # (d,)
-        self.register_buffer("center",    (a + b) / 2) # (d,)
-        self.register_buffer("halfwidth", (b - a) / 2) # (d,)
+
+        self.register_buffer("a", a)
+        self.register_buffer("b", b)
+        self.register_buffer("center", (a + b) / 2)
+        self.register_buffer("halfwidth", (b - a) / 2)
+        self.slope = slope
+
+        orders = [torch.arange(d), torch.arange(d).flip(0)]
+        self._maf = nn.ModuleList([
+            MaskedAutoregressiveTransform(
+                features=d,
+                univariate=self._univariate,
+                shapes=[(bins,), (bins,), (bins - 1,)],
+                order=orders[i % 2],
+                hidden_features=hidden_features,
+                activation=activation,
+            )
+            for i in range(transforms)
+        ])
+
+    def _univariate(self, *phi: Tensor):
+        return CircularRQSTransform(*phi, bound=self.halfwidth, slope=self.slope)
 
     def t(self) -> ComposedTransform:
-        """
-        Bijection on [a, b]^d as a zuko ComposedTransform.
-        Supports .inv and .call_and_ladj(x) -> (y, log|det J|).
-        """
-        inner = self().transform # ComposedTransform on [-pi, pi]^d
+        """Bijection on [a, b]^d as a ComposedTransform."""
+        inner = ComposedTransform(*[m() for m in self._maf])
         return ComposedTransform(
-            AffineTransform(loc=-self.center * torch.pi / self.halfwidth, scale=torch.pi / self.halfwidth),
+            AdditiveTransform(shift=-self.center),
             inner,
-            AffineTransform(loc=self.center, scale=self.halfwidth / torch.pi),
+            AdditiveTransform(shift= self.center),
         )
 
-    def zeros(self):
-        """
-        Initialize the flow to the identity by zeroing the last layer of
-        each conditioner MLP.
-        """
-        for t in self.transform.transforms:
-            last = t.hyper[-1]
+    def zeros(self) -> None:
+        """Initialize the flow to the identity by zeroing the last layer
+        of each conditioner MLP."""
+        for m in self._maf:
+            last = m.hyper[-1]
             nn.init.zeros_(last.weight)
             nn.init.zeros_(last.bias)
 
-class CNF(Flow):
-    """
-    Continuous normalizing flow (CNF) with a free-form Jacobian (FFJORD).
 
-    Acts as a bijection on the full unbounded R^d via an ODE drift learned
-    by an MLP. Unlike NSF / NCSF, no rectangular box is needed — CNFs live
-    on R^d natively, so `t()` returns the inner transform without affine
-    conjugation. The exact-log-det path is O(d) ODE evaluations per
-    Jacobian; pass `exact=False` to switch to a Hutchinson stochastic
-    estimate (faster, biased gradients during training).
+# ──────────────────────────────────────────────────────────────────────
+# CNF — Continuous Normalizing Flow on R^d (FFJORD)
+# ──────────────────────────────────────────────────────────────────────
+
+class CNF(Flow):
+    """Continuous normalizing flow (CNF) with a free-form Jacobian (FFJORD).
+
+    Acts as a bijection on R^d via an ODE drift learned by an MLP. The
+    exact-log-det path is O(d) ODE evaluations per Jacobian; pass
+    `exact=False` to switch to a Hutchinson stochastic estimate (faster,
+    biased gradients during training).
 
     Arguments:
         dimension: number of features d.
-        frequency: number of time-embedding frequencies in the ODE drift's
-            input. The drift MLP sees the integration time t ∈ [0, 1]
-            through 2 * frequency extra features (cos(k*pi*t), sin(k*pi*t)
-            for k = 1, ..., frequency), letting it modulate the velocity
-            field smoothly along t. Larger frequency gives a richer time
-            profile (more flexibility, slightly larger first MLP layer);
-            smaller frequency forces a near-constant drift (faster, less
-            expressive) (recommend: 3-6).
+        frequency: number of time-embedding frequencies in the ODE drift
+            (recommend: 3-6).
         absolute_tolerance: absolute tolerance of the adaptive ODE solver
-            (dopri5 from torchdiffeq under the hood). Each integration
-            step is accepted when its local error is below
-            absolute_tolerance + relative_tolerance * |solution|; smaller
-            absolute_tolerance = tighter accuracy, more solver substeps,
-            more compute. Use a tighter value if log|det J| disagrees
-            noticeably between forward and inverse calls (round-trip
-            error) (recommend: 1e-7 to 1e-5).
-        relative_tolerance: relative tolerance of the same solver, scaling
-            with the magnitude of the solution. Same speed/accuracy
-            trade-off as absolute_tolerance; in practice
-            absolute_tolerance dominates near the origin and
-            relative_tolerance dominates for large |x| (recommend: 1e-6
-            to 1e-4).
-        exact: if True, evaluate log|det J| exactly via the augmented ODE
-            (O(d) extra cost per step, deterministic gradients). If False,
-            use the Hutchinson trace estimator (one extra ODE component,
-            unbiased but stochastic gradients) — faster for large d but
-            adds Monte-Carlo noise to training.
-        hidden_features: ODE-MLP layer widths (recommend: (64, 64) or
-            (128, 64, 128); widen before deepening).
-        activation: ODE-MLP activation class, not instance (recommend:
-            nn.SiLU or nn.GELU for smooth drifts; nn.ELU is the zuko
-            default and works well too).
+            (recommend: 1e-7 to 1e-5).
+        relative_tolerance: relative tolerance (recommend: 1e-6 to 1e-4).
+        exact: if True, evaluate log|det J| exactly via the augmented ODE.
+            If False, use the Hutchinson trace estimator.
+        hidden_features: ODE-MLP layer widths (recommend: (64, 64)).
+        activation: ODE-MLP activation class (recommend: nn.SiLU).
     """
     def __init__(
         self,
@@ -286,12 +270,11 @@ class CNF(Flow):
         relative_tolerance: float = 1e-5,
         exact: bool = True,
         hidden_features: tuple[int, ...] = (64, 64),
-        activation: type[nn.Module] = nn.SiLU, # pass the class, not an instance
-    ):
+        activation: type[nn.Module] = nn.SiLU,
+    ) -> None:
         super().__init__()
         self._ffj = FFJTransform(
             features=dimension,
-            context=0,
             freqs=frequency,
             atol=absolute_tolerance,
             rtol=relative_tolerance,
@@ -301,58 +284,34 @@ class CNF(Flow):
         )
 
     def t(self) -> ComposedTransform:
-        """
-        Bijection on R^d as a zuko ComposedTransform.
-        Wraps the FFJ FreeFormJacobianTransform in a length-1
-        ComposedTransform so the Flow contract `t() -> ComposedTransform`
-        holds; .inv and .call_and_ladj delegate to the inner transform.
-        """
+        """Bijection on R^d as a length-1 ComposedTransform."""
         return ComposedTransform(self._ffj())
 
-    def zeros(self):
-        """
-        Initialize the flow to the identity by zeroing the last layer of
-        the ODE-drift MLP. With drift = 0, the ODE integrates to
-        x(1) = x(0) and log|det J| = 0.
-        """
+    def zeros(self) -> None:
+        """Drift = 0 → ODE flows trivially, identity bijection."""
         last = self._ffj.ode[-1]
         nn.init.zeros_(last.weight)
         nn.init.zeros_(last.bias)
 
+
+# ──────────────────────────────────────────────────────────────────────
+# RealNVP — affine-coupling flow on R^d
+# ──────────────────────────────────────────────────────────────────────
+
 class RealNVP(Flow):
-    """
-    Affine-coupling normalizing flow (RealNVP, Dinh et al. 2016).
+    """Affine-coupling normalizing flow (RealNVP, Dinh et al. 2016).
 
-    Acts as a bijection on the full unbounded R^d via N stacked coupling
-    transforms with checkered (alternating) feature masks. Each coupling
-    layer splits coordinates into "active" and "passive" halves and
-    applies an affine map  y_a = x_a * exp(s(x_p)) + t(x_p), where the
-    scale s and shift t come from a shared MLP conditioned on x_p; the
-    inverse and log-determinant are closed-form O(d).
-
-    Like CNF, RealNVP lives on R^d natively — no rectangular box is
-    needed and `t()` returns the composition of the coupling transforms
-    without affine conjugation. Compared to NSF, each coupling layer is
-    much weaker per parameter (affine vs. monotonic spline), so several
-    stacked layers are needed; compared to CNF, every operation is
-    closed-form and there is no ODE solver in the loop.
+    N stacked coupling transforms with checkered (or random) feature
+    masks; inverse and log|det J| are closed-form O(d).
 
     Arguments:
         dimension: number of features d.
-        transforms: number of stacked coupling layers. Each individual
-            layer only deforms half the coordinates, so a few are needed
-            to mix all features (recommend: 4-8; 4 is the zflows default,
-            6-8 for harder targets in dimension >= 8).
-        randmask: if True, use random per-layer masks instead of
-            checkered (alternating) ones. Default False is the canonical
-            RealNVP choice and works well in low dimension; set True for
-            high d (>~50) to ensure all feature pairs eventually mix.
-        hidden_features: per-layer widths of the coupling-conditioner
-            MLP (recommend: (64, 64) or (128, 128); widen before
-            deepening).
-        activation: conditioner-MLP activation class, not instance
-            (recommend: nn.SiLU or nn.GELU for smooth densities; the
-            original paper used nn.ReLU, also fine).
+        transforms: number of stacked coupling layers (recommend: 4-8).
+        randmask: if True, use random per-layer masks; otherwise alternate
+            checkered masks (the canonical RealNVP choice).
+        hidden_features: per-layer widths of the coupling-conditioner MLP
+            (recommend: (64, 64) or (128, 128)).
+        activation: conditioner MLP activation class (recommend: nn.SiLU).
     """
     def __init__(
         self,
@@ -360,8 +319,8 @@ class RealNVP(Flow):
         transforms: int = 4,
         randmask: bool = False,
         hidden_features: tuple[int, ...] = (64, 64),
-        activation: type[nn.Module] = nn.SiLU, # pass the class, not an instance
-    ):
+        activation: type[nn.Module] = nn.SiLU,
+    ) -> None:
         super().__init__()
         self._coupling = nn.ModuleList()
         for i in range(transforms):
@@ -372,7 +331,6 @@ class RealNVP(Flow):
             self._coupling.append(
                 GeneralCouplingTransform(
                     features=dimension,
-                    context=0,
                     mask=mask,
                     hidden_features=hidden_features,
                     activation=activation,
@@ -380,19 +338,11 @@ class RealNVP(Flow):
             )
 
     def t(self) -> ComposedTransform:
-        """
-        Bijection on R^d as a zuko ComposedTransform — the composition
-        of the affine coupling transforms. Supports .inv and
-        .call_and_ladj(x) -> (y, log|det J|).
-        """
+        """Bijection on R^d as the composition of all coupling transforms."""
         return ComposedTransform(*[c() for c in self._coupling])
 
-    def zeros(self):
-        """
-        Initialize the flow to the identity by zeroing the last layer of
-        each coupling-conditioner MLP. With (shift, scale) = (0, 0), each
-        MonotonicAffineTransform reduces to x -> x.
-        """
+    def zeros(self) -> None:
+        """Zeroing the last conditioner layer → identity per coupling layer."""
         for c in self._coupling:
             last = c.hyper[-1]
             nn.init.zeros_(last.weight)

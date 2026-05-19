@@ -3,7 +3,7 @@
 
 # zflows
 
-A small convenience wrapper around [zuko](https://github.com/probabilists/zuko) for normalizing flows, with first-class support for energy-based sampling.
+PyTorch normalizing flows for unconditional energy-based sampling. Strongly inspired by [zuko](https://github.com/probabilists/zuko).
 
 > **Status: experimental.** Tested only on **Linux + NVIDIA GPU**. On Windows, please use [WSL](https://github.com/microsoft/WSL) or avoid `Potential.enable_grad` — `torch.compile` is not supported there (see [pytorch/pytorch#167062](https://github.com/pytorch/pytorch/issues/167062)).
 >
@@ -73,7 +73,7 @@ Together these compose into a complete *propose → reweight → resample → re
 
 ## Installation
 
-`zflows` is pure Python; runtime dependencies ([`torch`](https://pytorch.org), [`zuko`](https://github.com/probabilists/zuko)) are resolved automatically by `pip`.
+`zflows` is pure Python; the only runtime dependency is [`torch`](https://pytorch.org), resolved automatically by `pip` (`numpy` is pulled in transitively).
 
 **1. Clone the repository.**
 

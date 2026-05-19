@@ -5,6 +5,7 @@
 # This bootstrap script
 git_init.sh
 run_all_tests.sh
+test_all.sh
 main.tex
 
 # Build / packaging artifacts
