@@ -307,3 +307,7 @@ pip install -e .
 Once `pip install -e .` succeeds, the package is registered against your local clone, so you can safely delete the GitHub remote (or even the `.git` directory) and `import zflows` will keep working. If you do, remember that `pip uninstall zflows` followed by a fresh `pip install -e .` will still need the source tree on disk — keep the cloned folder around, you just don't need its git history.
 
 </details>
+
+## Acknowledgements
+
+`zflows` is strongly inspired by [zuko](https://github.com/probabilists/zuko); the flow, transform, and masked-MLP machinery vendored into `zflows.core` is a stripped-down port of zuko's. Credit for the underlying design — and for the clean, composable `Transform` API the public flows build on — belongs to the zuko authors.
