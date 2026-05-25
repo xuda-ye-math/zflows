@@ -25,15 +25,17 @@ This works, but at small `d` the per-step time is dominated by Python overhead (
 
 ## The core mechanism
 
-The captured-once trick is in [`zflows/loss.py:76-128`](../zflows/loss.py#L76-L128) and amounts to:
+The captured-once trick is in [`zflows/loss.py`](../zflows/loss.py) and amounts to:
 
 ```python
-def compile(loss_fn, potential, transform, mode='default'):
+def compile(loss_fn, *captured, mode='default'):
     @torch.compile(mode=mode)
     def compiled(x):
-        return loss_fn(x, potential, transform)
+        return loss_fn(x, *captured)
     return compiled
 ```
+
+The four KL losses in `zflows.loss` all have signature `(x, potential, transform) -> scalar`, so the canonical call is `compile(reverse_KL, potential, transform)` with `captured = (potential, transform)`. The variadic form makes the same helper work for any custom loss whose first argument is the per-batch tensor and the rest are Python constants.
 
 Two things make this both **correct** and **fast**:
 

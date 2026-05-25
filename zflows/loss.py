@@ -79,36 +79,42 @@ def target_KL_G(y: torch.Tensor, source: Potential, G: ComposedTransform):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# compile — torch.compile a KL loss with (potential, transform) captured
+# compile — torch.compile a loss with all its non-batch args captured
 # ──────────────────────────────────────────────────────────────────────
 
 def compile(
-    loss_fn: Callable[[torch.Tensor, Potential, ComposedTransform], torch.Tensor],
-    potential: Potential,
-    transform: ComposedTransform,
+    loss_fn: Callable[..., torch.Tensor],
+    *captured,
     mode: str = 'default',
 ) -> Callable[[torch.Tensor], torch.Tensor]:
-    """torch.compile any of the four KL losses, with the heavy-Python
-    arguments baked into a closure.
+    """torch.compile any loss whose first argument is the per-batch tensor
+    and the rest are Python objects that should be baked into the closure.
 
-    The four losses in this module all share the positional signature
-    `(samples, potential, transform) -> scalar`, so a single helper
-    covers them all. `potential` and `transform` are captured as
-    closure constants — torch.compile sees them as static and does
-    NOT re-guard on the fresh `ComposedTransform` that `flow.t()`
-    builds on every call.
+    The four KL losses in this module all share the positional signature
+    `(samples, potential, transform) -> scalar`, so the canonical call is
+    `compile(reverse_KL, potential, transform)` — but the helper is
+    generic: any `loss_fn(x, *captured) -> scalar` works.
 
-    Captured-once correctness:
-        - flow.t() returns a `ComposedTransform` whose inner
+    Why capture as closure constants:
+        - `torch.compile`'s Dynamo guards each cached specialization by
+          input identity. The natural `loss_fn(x, target, flow.t())`
+          pattern builds a fresh `ComposedTransform` Python object per
+          call, so Dynamo either retraces every iteration or hits
+          `BACKEND_MATCH` failures — either way the speedup vanishes.
+        - Putting `target`, `transform`, etc. in the closure makes them
+          invisible to the guard system; every call presents the same
+          object identity and is a cache hit.
+
+    Captured-once correctness for flow training:
+        - `flow.t()` returns a `ComposedTransform` whose inner
           `AutoregressiveTransform` objects hold *lazy* `meta` callables
           that read flow parameters via attribute access on every
           forward pass.
         - `optimizer.step()` mutates those `nn.Parameter` tensors
           in-place, so the captured `transform` sees the post-step
           values without rebuilding.
-        - This works whether or not you compile. Capturing the
-          transform once is in fact a mild speedup even without
-          torch.compile (saves the per-batch object construction).
+        - Capturing the transform once is in fact a mild speedup even
+          without torch.compile (saves the per-batch object construction).
 
     Caveats:
         - mode='default' is safe; mode='reduce-overhead' uses CUDA
@@ -119,25 +125,29 @@ def compile(
         - Dynamo retraces on tensor-shape changes. Keep `BATCH` fixed.
 
     Arguments:
-        loss_fn:   one of {source_KL_F, source_KL_G, target_KL_F,
-                   target_KL_G} or the aliases reverse_KL / forward_KL.
-        potential: the target (for source_KL_*) or source (for
-                   target_KL_*) — whatever `loss_fn` expects as its
-                   second positional argument.
-        transform: the ComposedTransform to bake in. Typically `flow.t()`.
-        mode:      torch.compile mode. Default 'default'.
+        loss_fn:   any callable with signature (x, *captured) -> scalar.
+                   The four KL losses in this module all fit.
+        *captured: the rest of `loss_fn`'s positional arguments, baked
+                   into the returned closure. For the KL losses this is
+                   `(potential, transform)`.
+        mode:      torch.compile mode (keyword-only). Default 'default'.
 
     Returns:
         callable (x_batch: Tensor) -> scalar loss.
 
-    Example:
+    Example (canonical KL case):
         F = flow.t()
         loss = zflows.loss.compile(reverse_KL, u1, F)
         for x_batch in batches:
             l = loss(x_batch)
             optimizer.zero_grad(); l.backward(); optimizer.step()
+
+    Example (custom loss with extra constants):
+        def my_loss(x, target, transform, beta):
+            ...
+        loss = zflows.loss.compile(my_loss, u_target, F, 0.5)
     """
     @torch.compile(mode=mode)
     def compiled(x: torch.Tensor) -> torch.Tensor:
-        return loss_fn(x, potential, transform)
+        return loss_fn(x, *captured)
     return compiled
