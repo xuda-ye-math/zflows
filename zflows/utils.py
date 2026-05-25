@@ -4,6 +4,11 @@ import torch
 from .flow import ComposedTransform
 from .potential import Potential
 
+
+# ──────────────────────────────────────────────────────────────────────
+# ESS / CESS — effective sample size diagnostics
+# ──────────────────────────────────────────────────────────────────────
+
 def compute_ESS(weights: torch.Tensor) -> torch.Tensor:
     """
     Compute the Effective Sample Size (ESS) of samples with given
@@ -72,6 +77,11 @@ def compute_CESS_log(source_weights: torch.Tensor, log_importance_weights: torch
     log_w1 = log_s + log_importance_weights
     log_w2 = log_s + 2 * log_importance_weights
     return (2 * torch.logsumexp(log_w1, dim=0) - torch.logsumexp(log_w2, dim=0)).exp()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Importance weights — log/linear-space SMC reweighting
+# ──────────────────────────────────────────────────────────────────────
 
 def importance_weights(samples: torch.Tensor, source: Potential, target: Potential, F: ComposedTransform, chunk: int = 1) -> torch.Tensor:
     """
@@ -150,6 +160,11 @@ def importance_weights_log(samples: torch.Tensor, source: Potential, target: Pot
         out.append(-target(y) + source(x) + ladj)
     return torch.cat(out, dim=0)
 
+
+# ──────────────────────────────────────────────────────────────────────
+# Resample — multinomial resampling with replacement
+# ──────────────────────────────────────────────────────────────────────
+
 def resample(samples: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     """
     Multinomial resampling from weighted distribution with replacement
@@ -163,6 +178,11 @@ def resample(samples: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     probs = weights / weights.sum()
     idx = torch.multinomial(probs, N, replacement=True)
     return samples[idx]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# L-BFGS — batched mode finder / MAP refinement
+# ──────────────────────────────────────────────────────────────────────
 
 def lbfgs(samples: torch.Tensor, potential: Potential, step: float = 1.0, iters: int = 100, memory: int = 6, armijo: bool = False, chunk: int = 1) -> torch.Tensor:
     """
@@ -329,6 +349,10 @@ def lbfgs(samples: torch.Tensor, potential: Potential, step: float = 1.0, iters:
     return torch.cat(out, dim=0)
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Langevin — overdamped Langevin / MALA / tamed variants
+# ──────────────────────────────────────────────────────────────────────
+
 def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, iters: int = 100, adjust: bool = False, taming: float = 0, chunk: int = 1) -> torch.Tensor:
     """
     Langevin dynamics targeting the distribution exp(-U(x)).
@@ -418,6 +442,10 @@ def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, it
         out.append(x)
     return torch.cat(out, dim=0)
 
+
+# ──────────────────────────────────────────────────────────────────────
+# HMC — Hamiltonian Monte Carlo with leapfrog + MH gate
+# ──────────────────────────────────────────────────────────────────────
 
 def hmc(samples: torch.Tensor, potential: Potential, step: float = 1e-2, iters: int = 10, burns: int = 10, chunk: int = 1) -> torch.Tensor:
     """
@@ -545,3 +573,191 @@ optimization = lbfgs
 
 # alias: in SMC literature, Langevin steps are the standard "rejuvenation" move
 rejuvenation = langevin
+
+
+# ──────────────────────────────────────────────────────────────────────
+# torch.compile environment helpers
+# ──────────────────────────────────────────────────────────────────────
+
+def check_compile_available() -> bool:
+    """Diagnose whether the current environment can actually run torch.compile.
+
+    Runs three checks, in order. The first two emit non-blocking warnings
+    and do NOT affect the return value — they only flag known footguns
+    (non-Linux OS, missing `nvcc`) so the user gets a useful pointer if
+    the third check then fails. The third check is the authoritative one:
+    it really compiles + runs a tiny function and the return value reflects
+    only its success.
+
+    Checks:
+      1. **OS:** zflows has only been tested on Linux + NVIDIA GPU.
+         `torch.compile` does not run on native Windows
+         (https://github.com/pytorch/pytorch/issues/167062); on macOS the
+         flow code imports but the compiled fast paths are untested.
+         Warns if `platform.system() != 'Linux'`.
+      2. **nvcc on $PATH:** `torch.compile`'s Triton / TorchInductor backend
+         JIT-compiles a small CUDA helper on first use, which requires the
+         CUDA Toolkit's C++ compiler `nvcc` — *not* just the CUDA runtime
+         shipped with the PyTorch wheel. Warns if `shutil.which('nvcc')`
+         returns None. Harmless if you only intend to compile on CPU.
+      3. **Sanity test (authoritative):** actually `torch.compile` a small
+         function and run one forward pass. On CUDA, uses
+         `mode='reduce-overhead'` (the mode that `Potential.enable_grad` /
+         `enable_eval` and `loss.compile` default to); on CPU, uses
+         `mode='default'`. The return value is True iff this step succeeds.
+
+    Prints a one-line PASS/WARN/FAIL summary for each step.
+
+    Intended usage: **run interactively or from a standalone diagnostic
+    script** — not from your main training code. The sanity test really
+    invokes `torch.compile`, which costs compile time on every call and
+    consumes a Dynamo cache slot. Use it once to validate a fresh
+    environment, then remove the call.
+
+    Returns:
+        bool: True iff the sanity test succeeded. The OS / nvcc warnings
+              do NOT influence this value — a Mac with `nvcc` missing but
+              a working CPU `torch.compile` will still return True.
+    """
+    import platform
+    import shutil
+    import warnings
+
+    import torch
+
+    # (1) OS check — warn, do not gate
+    sys_name = platform.system()
+    if sys_name == "Linux":
+        print(f"[OK ]   OS = {sys_name}")
+    else:
+        warnings.warn(
+            f"torch.compile might not be supported on your system: {sys_name}. "
+            f"zflows is tested only on Linux + NVIDIA GPU. On native Windows, "
+            f"use WSL; macOS is untested."
+        )
+        print(f"[WARN] OS = {sys_name}  (torch.compile may not work)")
+
+    # (2) nvcc check — warn, do not gate (CPU-only setups don't need it)
+    nvcc_path = shutil.which("nvcc")
+    if nvcc_path is not None:
+        print(f"[OK ]   nvcc = {nvcc_path}")
+    else:
+        warnings.warn(
+            "nvcc not found on $PATH. torch.compile's Triton / TorchInductor "
+            "backend needs the CUDA Toolkit's C++ compiler (nvcc) when "
+            "compiling CUDA kernels — the CUDA runtime that ships with the "
+            "PyTorch wheel is NOT enough. Install the full toolkit via your "
+            "distro's package manager (`cuda-toolkit` on Ubuntu/Arch) or "
+            "https://developer.nvidia.com/cuda-downloads. Harmless if you "
+            "only intend to compile on CPU."
+        )
+        print("[WARN] nvcc not on $PATH  (CUDA Toolkit may be missing)")
+
+    # (3) Sanity test — the authoritative check; gates the return value
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    mode = "reduce-overhead" if device == "cuda" else "default"
+
+    @torch.compile(mode=mode)
+    def _probe(x: torch.Tensor) -> torch.Tensor:
+        return x.sin() + x.cos()
+
+    try:
+        x = torch.randn(8, device=device)
+        y = _probe(x)
+        if device == "cuda":
+            torch.cuda.synchronize()
+        _ = y.sum().item()
+        print(f"[OK ]   sanity test passed (device={device}, mode={mode})")
+        ok = True
+    except Exception as e:
+        print(f"[FAIL] sanity test (device={device}, mode={mode}): "
+              f"{type(e).__name__}: {e}")
+        ok = False
+
+    print()
+    print("Note: please run check_compile_available() interactively or in a "
+          "standalone python script. Do not call it from your main training "
+          "code — the sanity test really invokes torch.compile, which costs "
+          "compile time on every call and consumes a Dynamo cache slot.")
+    return ok
+
+
+def set_cache_size_limit(limit: int = 8) -> None:
+    """Set torch._dynamo's per-code-object compile-cache size limit.
+
+    Dynamo caches compiled specializations per ``__code__`` object. The stock
+    default is 8 — plenty for a normal training loop with one model and a
+    fixed batch shape. Sweep / benchmark code that compiles many distinct
+    closures sharing one code body can exceed the limit and silently fall
+    back to eager from cell N+1 onward. Common triggers:
+
+      - hyperparameter sweeps where `zflows.loss.compile` is called once
+        per cell (each call produces a fresh closure on the same code
+        object, distinguished by the captured `transform` and `potential`);
+      - annealed training that constructs many short-lived `Potential`
+        instances of the same subclass, each calling `.enable_grad()`;
+      - scripts that mix several distinct compiled functions.
+
+    Bump the limit only when you actually observe eager fallback (set
+    `torch._dynamo.config.suppress_errors = False` and watch for recompile
+    warnings, or set `torch._logging.set_logs(recompiles=True)` to see
+    them directly). Each cached spec costs a small amount of memory and a
+    constant lookup overhead on every call, so don't raise it gratuitously.
+    Needing > 100 usually indicates an uncontrolled retrace pattern that's
+    better fixed at its source (mark dynamic shapes, share backends, or
+    restructure to reuse compiled objects).
+
+    Argument:
+        limit: max number of specializations to cache per code object.
+            Default 8 matches torch._dynamo's stock setting (so calling
+            with no argument resets to the default).
+
+    Typical usage at the top of a sweep script::
+
+        from zflows.utils import set_cache_size_limit
+        set_cache_size_limit(64)   # generous headroom for ~30 specs
+    """
+    import torch._dynamo
+    torch._dynamo.config.cache_size_limit = limit
+
+
+def suppress_warnings() -> None:
+    """Silence the various warning/log channels that PyTorch, Triton, and
+    Inductor emit during a typical zflows training run (especially with
+    `torch.compile` / `zflows.loss.compile` in the loop).
+
+    Covers four orthogonal layers of noise:
+      1. **Python `warnings`** (e.g. inductor's TF32 hint, deprecation
+         warnings from `torch.distributions`): filter to "ignore".
+      2. **torch._logging channels** (recompiles, graph breaks): toggled off.
+      3. **Triton autotune stderr** (per-kernel "AUTOTUNE addmm ..." banners
+         from the Triton C-side autotuner): silenced via
+         `TRITON_PRINT_AUTOTUNING=0`. Only takes effect for kernels that
+         have not been autotuned yet — call this BEFORE the first
+         `torch.compile` invocation.
+      4. **Inductor compile-worker interleaving** (gcc/nvcc warnings,
+         `_POSIX_C_SOURCE redefined`, etc.): serialized to one worker via
+         `TORCHINDUCTOR_COMPILE_THREADS=1`. Same caveat as (3): set it
+         before workers spawn (i.e. before the first compile call).
+
+    The function is idempotent and safe to call multiple times. Real
+    compile failures still raise — only the routine noise is muted.
+
+    Typical usage at the top of a training script::
+
+        from zflows.utils import suppress_warnings
+        suppress_warnings()
+        # ... rest of imports and training code
+    """
+    import os
+    import warnings
+
+    os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "0")
+    os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
+
+    warnings.filterwarnings("ignore")
+
+    # Import lazily to avoid pulling torch._logging into module-load if the
+    # user never calls this function.
+    import torch._logging
+    torch._logging.set_logs(recompiles=False, graph_breaks=False)

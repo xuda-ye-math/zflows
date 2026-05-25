@@ -9,7 +9,8 @@ Public surface:
     zflows.loss      : reverse_KL, forward_KL, compile
     zflows.utils     : compute_ESS, compute_ESS_log, compute_CESS, compute_CESS_log,
                        importance_weights, importance_weights_log,
-                       resample, langevin, rejuvenation, hmc, lbfgs, optimization
+                       resample, langevin, rejuvenation, hmc, lbfgs, optimization,
+                       check_compile_available, set_cache_size_limit, suppress_warnings
 
 `ComposedTransform` lives in `zflows.core.transforms` and is re-exported
 from `zflows.flow` so downstream code stays implementation-agnostic.
@@ -22,3 +23,7 @@ divergences:
        per-coordinate `bound` tensor so spline knots can natively span
        `[-bound_i, bound_i]` without an affine scaling sandwich.
 """
+
+from . import flow, loss, potential, utils
+
+__all__ = ["flow", "loss", "potential", "utils"]
