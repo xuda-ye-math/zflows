@@ -83,6 +83,12 @@ class NSF(Flow):
         transforms: number of stacked autoregressive layers. Too few
             underfits multimodal targets; too many hurts optimization
             (recommend: 4-6).
+        randmask: per-layer feature ordering. True (default) draws a
+            fresh torch.randperm(d) per layer — recommended at d >= 4
+            because it breaks the bipartite symmetry that the alternating
+            scheme imposes. False uses arange(d) / arange(d).flip(0)
+            alternation (the prior behaviour). Reproducible from a global
+            torch seed in either case.
         hidden_features: per-layer widths of the autoregressive conditioner
             MLP. A mild bottleneck works well (recommend: (64, 64) or
             (128, 64, 128); widen before deepening).
@@ -97,6 +103,7 @@ class NSF(Flow):
         bins: int = 8,
         slope: float = 1e-3,
         transforms: int = 4,
+        randmask: bool = True,
         hidden_features: tuple[int, ...] = (64, 64),
         activation: type[nn.Module] = nn.SiLU,
     ) -> None:
@@ -116,13 +123,19 @@ class NSF(Flow):
         self.register_buffer("halfwidth", (b - a) / 2)
         self.slope = slope
 
-        orders = [torch.arange(d), torch.arange(d).flip(0)]
+        if randmask:
+            orders_list = [torch.randperm(d) for _ in range(transforms)]
+        else:
+            orders_list = [
+                torch.arange(d) if i % 2 == 0 else torch.arange(d).flip(0)
+                for i in range(transforms)
+            ]
         self._maf = nn.ModuleList([
             MaskedAutoregressiveTransform(
                 features=d,
                 univariate=self._univariate,
                 shapes=[(bins,), (bins,), (bins - 1,)],
-                order=orders[i % 2],
+                order=orders_list[i],
                 hidden_features=hidden_features,
                 activation=activation,
             )
@@ -174,6 +187,11 @@ class NCSF(Flow):
         bins: number of spline knots per coordinate (recommend: 8-16).
         slope: minimum slope of each spline segment (recommend: 1e-3 to 1e-2).
         transforms: number of stacked autoregressive layers (recommend: 4-6).
+        randmask: per-layer feature ordering. True (default) draws a
+            fresh torch.randperm(d) per layer — the only legal expressivity
+            lever on a torus (linear mixings break periodicity). False
+            uses arange(d) / arange(d).flip(0) alternation (the prior
+            behaviour). Reproducible from a global torch seed in either case.
         hidden_features: per-layer widths of the autoregressive conditioner
             MLP (recommend: (64, 64) or (128, 64, 128)).
         activation: activation class (not instance) used inside the
@@ -186,6 +204,7 @@ class NCSF(Flow):
         bins: int = 8,
         slope: float = 1e-3,
         transforms: int = 4,
+        randmask: bool = True,
         hidden_features: tuple[int, ...] = (64, 64),
         activation: type[nn.Module] = nn.SiLU,
     ) -> None:
@@ -204,13 +223,19 @@ class NCSF(Flow):
         self.register_buffer("halfwidth", (b - a) / 2)
         self.slope = slope
 
-        orders = [torch.arange(d), torch.arange(d).flip(0)]
+        if randmask:
+            orders_list = [torch.randperm(d) for _ in range(transforms)]
+        else:
+            orders_list = [
+                torch.arange(d) if i % 2 == 0 else torch.arange(d).flip(0)
+                for i in range(transforms)
+            ]
         self._maf = nn.ModuleList([
             MaskedAutoregressiveTransform(
                 features=d,
                 univariate=self._univariate,
                 shapes=[(bins,), (bins,), (bins - 1,)],
-                order=orders[i % 2],
+                order=orders_list[i],
                 hidden_features=hidden_features,
                 activation=activation,
             )
@@ -307,8 +332,10 @@ class RealNVP(Flow):
     Arguments:
         dimension: number of features d.
         transforms: number of stacked coupling layers (recommend: 4-8).
-        randmask: if True, use random per-layer masks; otherwise alternate
-            checkered masks (the canonical RealNVP choice).
+        randmask: if True (default), draw a fresh randomised checkered
+            mask per layer (better mixing at d >= 4). If False, use the
+            canonical alternating-checkered RealNVP masks. Reproducible
+            from a global torch seed in either case.
         hidden_features: per-layer widths of the coupling-conditioner MLP
             (recommend: (64, 64) or (128, 128)).
         activation: conditioner MLP activation class (recommend: nn.SiLU).
@@ -317,7 +344,7 @@ class RealNVP(Flow):
         self,
         dimension: int,
         transforms: int = 4,
-        randmask: bool = False,
+        randmask: bool = True,
         hidden_features: tuple[int, ...] = (64, 64),
         activation: type[nn.Module] = nn.SiLU,
     ) -> None:

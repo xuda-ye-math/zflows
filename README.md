@@ -16,10 +16,10 @@ PyTorch normalizing flows for unconditional energy-based sampling. Strongly insp
 ```python
 from zflows.flow import NSF, NCSF, CNF, RealNVP
 
-NSF(a=[0.0, 0.0], b=[1.0, 1.0], bins=8, slope=1e-3, transforms=4, hidden_features=(64, 64), activation=nn.SiLU)
-NCSF(a=[-1.0, -1.0], b=[1.0, 1.0], bins=8, slope=1e-3, transforms=4, hidden_features=(64, 64), activation=nn.SiLU)
+NSF(a=[0.0, 0.0], b=[1.0, 1.0], bins=8, slope=1e-3, transforms=4, randmask=True, hidden_features=(64, 64), activation=nn.SiLU)
+NCSF(a=[-1.0, -1.0], b=[1.0, 1.0], bins=8, slope=1e-3, transforms=4, randmask=True, hidden_features=(64, 64), activation=nn.SiLU)
 CNF(dimension=8, frequency=3, exact=True, hidden_features=(64, 64), activation=nn.SiLU)
-RealNVP(dimension=8, transforms=4, randmask=False, hidden_features=(64, 64), activation=nn.SiLU)
+RealNVP(dimension=8, transforms=4, randmask=True, hidden_features=(64, 64), activation=nn.SiLU)
 ```
 
 all subclassing the same `Flow` [abstract class](https://docs.python.org/3/library/abc.html) (`nn.Module` + `abc.ABC`):
@@ -35,6 +35,8 @@ x_back = F.inv(y) # inverse
 ```
 
 Swapping one flow class for another is a one-line change. Per-class hyperparameters are documented in [`flow.py`](zflows/flow.py). Every flow class also exposes `flow.zeros()`, which initialises the network so that the flow map is exactly the identity.
+
+**Mixing strategy — `randmask`.** `NSF`, `NCSF`, and `RealNVP` share a unified `randmask: bool = True` parameter that controls how per-layer feature ordering is generated. With `randmask=True` (the default) every layer draws a fresh `torch.randperm(d)` — the autoregressive ordering for `NSF` / `NCSF`, the checkered mask for `RealNVP` — which breaks the bipartite symmetry of the legacy `arange(d) / arange(d).flip(0)` alternation and is recommended at `d ≥ 4`. Set `randmask=False` for the alternating scheme (the prior behaviour). Reproducibility is via a global `torch.manual_seed(...)` before flow construction in either case.
 
 **Precompiled gradients on `Potential`.** Any subclass of `Potential` opts into a `torch.compile`-compiled `vmap(grad(u))` with a single call:
 
@@ -285,7 +287,7 @@ The two env vars don't change the warnings themselves; they prune the messages a
 - `TRITON_PRINT_AUTOTUNING=0` mutes Triton's per-kernel autotune banner that re-prints the compile output.
 - `TORCHINDUCTOR_COMPILE_THREADS=1` serializes the Inductor compile workers, so any remaining diagnostic is printed once instead of N times in interleaved chunks.
 
-You can see this in action in [`tests/3D_periodic.py`](tests/3D_periodic.py) and [`tests/_hmc.py`](tests/_hmc.py).
+You can see this in action in [`tests/3D_periodic.py`](tests/3D_periodic.py) and [`tests/_verify_utils.py`](tests/_verify_utils.py).
 
 </details>
 
