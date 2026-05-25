@@ -3,7 +3,7 @@
 
 # zflows
 
-PyTorch normalizing flows for unconditional energy-based sampling. Strongly inspired by [zuko](https://github.com/probabilists/zuko).
+PyTorch normalizing flows for unconditional energy-based sampling and Boltzmann generator.
 
 > **Status: experimental.** Tested only on **Linux + NVIDIA GPU**. On Windows, please use [WSL](https://github.com/microsoft/WSL) or avoid `Potential.enable_grad` — `torch.compile` is not supported there (see [pytorch/pytorch#167062](https://github.com/pytorch/pytorch/issues/167062)).
 >
