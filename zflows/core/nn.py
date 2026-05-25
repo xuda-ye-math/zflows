@@ -22,6 +22,10 @@ from torch import BoolTensor, Tensor
 __all__ = ["Linear", "MaskedLinear", "MaskedMLP", "MLP"]
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Linear — basic dense layer with optional stack dim
+# ──────────────────────────────────────────────────────────────────────
+
 def linear(x: Tensor, W: Tensor, b: Tensor | None = None) -> Tensor:
     """Forward of W x + b that handles both stacked and non-stacked W."""
     if W.dim() == 2:
@@ -69,6 +73,10 @@ class Linear(nn.Module):
         return linear(x, self.weight, self.bias)
 
 
+# ──────────────────────────────────────────────────────────────────────
+# MLP — multi-layer perceptron (RealNVP coupling, CNF ODE drift)
+# ──────────────────────────────────────────────────────────────────────
+
 class MLP(nn.Sequential):
     """Multi-layer perceptron with configurable hidden widths/activation."""
 
@@ -94,6 +102,10 @@ class MLP(nn.Sequential):
         self.in_features = in_features
         self.out_features = out_features
 
+
+# ──────────────────────────────────────────────────────────────────────
+# MaskedLinear / MaskedMLP — autoregressive conditioner backbone (MAF)
+# ──────────────────────────────────────────────────────────────────────
 
 class MaskedLinear(nn.Linear):
     """Linear with a fixed boolean adjacency mask on the weight matrix."""

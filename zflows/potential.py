@@ -3,6 +3,11 @@
 import torch
 from torch import nn
 
+
+# ──────────────────────────────────────────────────────────────────────
+# Potential — abstract base + compiled grad/eval fast paths
+# ──────────────────────────────────────────────────────────────────────
+
 class Potential(nn.Module):
     """
     Generic Potential class. forward() computes the potential function.
@@ -166,6 +171,11 @@ class Potential(nn.Module):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+
+# ──────────────────────────────────────────────────────────────────────
+# Concrete potentials — Uniform, Gaussian, Gaussian_Mixture
+# ──────────────────────────────────────────────────────────────────────
+
 class Uniform(Potential):
     """
     Uniform distribution with constant potential.
@@ -320,6 +330,11 @@ class Gaussian_Mixture(Potential):
         idx = torch.multinomial(self.log_weights.exp(), N, replacement=True) # [N]
         z = torch.randn(N, self.d, device=self.device)
         return self.mean[idx] + self.variance[idx].sqrt() * z
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Compositional — Linear_Combination of potentials (annealing bridges)
+# ──────────────────────────────────────────────────────────────────────
 
 class Linear_Combination(Potential):
     """

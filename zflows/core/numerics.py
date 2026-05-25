@@ -36,6 +36,10 @@ __all__ = [
 ]
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Partial — nn.Module-aware functools.partial
+# ──────────────────────────────────────────────────────────────────────
+
 class Partial(nn.Module):
     """An nn.Module-aware version of functools.partial.
 
@@ -91,6 +95,10 @@ class Partial(nn.Module):
     def forward(self, *args, **kwargs) -> Any:
         return self.f(*self.args, *args, **self.kwargs, **kwargs)
 
+
+# ──────────────────────────────────────────────────────────────────────
+# Bisection — implicit-grad bisection root finder
+# ──────────────────────────────────────────────────────────────────────
 
 def bisection(
     f: Callable[[Tensor], Tensor],
@@ -151,6 +159,10 @@ class Bisection(torch.autograd.Function):
         return (None, grad_y, None, None, None, *grad_phi)
 
 
+# ──────────────────────────────────────────────────────────────────────
+# broadcast — torch.broadcast_to over the leading dims
+# ──────────────────────────────────────────────────────────────────────
+
 def broadcast(*tensors: Tensor, ignore: int | Sequence[int] = 0) -> list[Tensor]:
     """Broadcast tensors over leading dims; keep the last `ignore` dims intact."""
 
@@ -167,6 +179,10 @@ def broadcast(*tensors: Tensor, ignore: int | Sequence[int] = 0) -> list[Tensor]
         for t, i in zip(tensors, dims, strict=True)
     ]
 
+
+# ──────────────────────────────────────────────────────────────────────
+# Gauss–Legendre — n-point quadrature on [a, b] with implicit-grad rule
+# ──────────────────────────────────────────────────────────────────────
 
 def gauss_legendre(
     f: Callable[[Tensor], Tensor],
@@ -237,6 +253,10 @@ class GaussLegendre(torch.autograd.Function):
         nodes = torch.lerp(a[..., None], b[..., None], nodes).movedim(-1, 0)
         return (b - a) * torch.tensordot(weights, f(nodes), dims=1)
 
+
+# ──────────────────────────────────────────────────────────────────────
+# ODE solver — Dormand-Prince adaptive RK with checkpointed adjoint
+# ──────────────────────────────────────────────────────────────────────
 
 def odeint(
     f: Callable[[Tensor, Tensor], Tensor],
@@ -404,6 +424,10 @@ class AdaptiveCheckpointAdjoint(torch.autograd.Function):
             grad_t0 = None
         return (None, None, grad_x, grad_t0, grad_t1, *grad_phi)
 
+
+# ──────────────────────────────────────────────────────────────────────
+# unpack — split a packed tensor along its last dim by shapes
+# ──────────────────────────────────────────────────────────────────────
 
 def unpack(x: Tensor, shapes: Sequence[Size]) -> Sequence[Tensor]:
     """Inverse of `torch.cat([t.flatten() for t in tensors])` given shapes."""

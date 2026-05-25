@@ -6,6 +6,11 @@ import torch
 from .flow import ComposedTransform
 from .potential import Potential
 
+
+# ──────────────────────────────────────────────────────────────────────
+# KL loss estimators — Monte Carlo KL divergences on source / target
+# ──────────────────────────────────────────────────────────────────────
+
 def source_KL_F(x: torch.Tensor, target: Potential, F: ComposedTransform):
     """
     KL loss using source samples to train F (the source -> target map).
@@ -72,6 +77,10 @@ def target_KL_G(y: torch.Tensor, source: Potential, G: ComposedTransform):
     x, ladj = G.call_and_ladj(y) # x = G(y), ladj = log|det J_G(y)|
     return (source(x) - ladj).mean()
 
+
+# ──────────────────────────────────────────────────────────────────────
+# compile — torch.compile a KL loss with (potential, transform) captured
+# ──────────────────────────────────────────────────────────────────────
 
 def compile(
     loss_fn: Callable[[torch.Tensor, Potential, ComposedTransform], torch.Tensor],
