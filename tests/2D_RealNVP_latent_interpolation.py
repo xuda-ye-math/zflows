@@ -6,6 +6,9 @@ import torch
 from zflows.flow import RealNVP
 from zflows.potential import Gaussian, Gaussian_Mixture
 from zflows.loss import forward_KL
+from zflows.utils import suppress_warnings
+
+suppress_warnings()
 
 HERE = Path(__file__).resolve().parent
 

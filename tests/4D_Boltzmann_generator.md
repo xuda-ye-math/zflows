@@ -51,14 +51,14 @@ Pointers into the script:
 
 - imports, env vars, device & seed: [`4D_Boltzmann_generator.py:1–17`](4D_Boltzmann_generator.py#L1-L17)
 - source (4D Gaussian) and target ($U_1$ class): [`4D_Boltzmann_generator.py:19–48`](4D_Boltzmann_generator.py#L19-L48)
-- `.pt` cache: training is skipped on subsequent runs by loading `4D_Boltzmann_generator.pt`: [`4D_Boltzmann_generator.py:50–57`](4D_Boltzmann_generator.py#L50-L57)
+- `.pth` cache: training is skipped on subsequent runs by loading `4D_Boltzmann_generator.pth`: [`4D_Boltzmann_generator.py:50–57`](4D_Boltzmann_generator.py#L50-L57)
 - training branch — flow init, validation cloud, ladder $c_k$: [`4D_Boltzmann_generator.py:58–86`](4D_Boltzmann_generator.py#L58-L86)
 - per-rung loop (5 steps: resample → train → IS → resample → MALA): [`4D_Boltzmann_generator.py:92–136`](4D_Boltzmann_generator.py#L92-L136)
 - saving the cache: [`4D_Boltzmann_generator.py:138–144`](4D_Boltzmann_generator.py#L138-L144)
 - ESS history printout: [`4D_Boltzmann_generator.py:146–150`](4D_Boltzmann_generator.py#L146-L150)
 - two-row visualization (Cartesian + polar): [`4D_Boltzmann_generator.py:152–217`](4D_Boltzmann_generator.py#L152-L217)
 
-The first invocation runs the annealing ($M = 12$ rungs of training + IS + MALA) and saves a `.pt` cache containing `x_valid_history` (M+1 snapshots) and `ess_history` (M floats). Subsequent invocations load the cache and skip directly to the visualization.
+The first invocation runs the annealing ($M = 12$ rungs of training + IS + MALA) and saves a `.pth` cache containing `x_valid_history` (M+1 snapshots) and `ess_history` (M floats). Subsequent invocations load the cache and skip directly to the visualization.
 
 ### Visualizing the annealed cloud
 

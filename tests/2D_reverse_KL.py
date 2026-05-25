@@ -2,8 +2,10 @@ from pathlib import Path
 import torch
 from zflows.flow import NSF
 from zflows.potential import Potential, Gaussian
-from zflows.utils import compute_ESS_log
+from zflows.utils import compute_ESS_log, suppress_warnings
 from zflows.loss import reverse_KL
+
+suppress_warnings()
 
 HERE = Path(__file__).resolve().parent
 

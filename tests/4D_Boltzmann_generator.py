@@ -1,15 +1,23 @@
 # pyright: reportArgumentType=false, reportCallIssue=false
 
 from pathlib import Path
-import os
-os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "0")
-os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1") # cleaner logs
 
 import torch
 from zflows.potential import Potential, Gaussian, Linear_Combination
 from zflows.flow import NSF
+import zflows.loss
 from zflows.loss import reverse_KL
-from zflows.utils import compute_ESS_log, resample, rejuvenation, importance_weights_log
+from zflows.utils import (
+    compute_ESS_log, resample, rejuvenation, importance_weights_log,
+    set_cache_size_limit, suppress_warnings,
+)
+
+# Silence Triton autotune / Inductor / Dynamo / Python warnings, and give
+# Dynamo enough cache headroom: the annealing loop creates one fresh
+# loss.compile() per bridge (M = 12 in this script), plus enable_grad +
+# enable_eval each step, plus a few internal compiles in MALA / Adam.
+suppress_warnings()
+set_cache_size_limit(32)
 
 HERE = Path(__file__).resolve().parent
 
@@ -47,7 +55,7 @@ class U_target(Potential):
 
 u_target = U_target(r0=2.0, a=1.0, q2=4.0).to(device) # eps = 1e-3 (default)
 
-PT_PATH = HERE / "4D_Boltzmann_generator.pt"
+PT_PATH = HERE / "4D_Boltzmann_generator.pth"
 
 if PT_PATH.exists():
     print(f"found existing {PT_PATH}, loading history (skipping training)")
@@ -85,6 +93,13 @@ else:
 
     optimizer = torch.optim.Adam(flow.parameters(), lr=LR)
 
+    # Captured-once forward bijection: optimizer.step() updates flow's
+    # nn.Parameters in-place, and the lazy Transform machinery re-reads
+    # them by attribute access on every forward, so reusing F across
+    # anneal steps is correct and saves one ComposedTransform-construction
+    # per batch.
+    F = flow.t()
+
     # annealed Boltzmann generator: for each k = 1, ..., M, train the flow
     # using the previous and current bridges
     #     U_{k-1} = (1 - c_{k-1}) * U_source + c_{k-1} * U_target
@@ -101,12 +116,16 @@ else:
         # (2) train the flow: reverse KL from x_train_prev (~mu_{k-1}) to U_curr (mu_k).
         # The U_{k-1}(x) term in the reverse-KL objective is parameter-independent,
         # so reverse_KL(x, target=U_curr, flow) gives the right loss directly.
+        # Compile the loss for THIS bridge: U_curr changes per step, so one
+        # spec accumulates per anneal rung (M = 12 specs total, well under
+        # the cache_size_limit of 32 set at the top).
+        loss_fn = zflows.loss.compile(reverse_KL, U_curr, F)
         for epoch in range(EPOCH):
             perm = torch.randperm(N_TRAIN, device=device)
             epoch_loss, n_batches = 0.0, 0
             for start in range(0, N_TRAIN, BATCH):
                 x_batch = x_train_prev[perm[start:start + BATCH]]
-                loss = reverse_KL(x_batch, target=U_curr, F=flow.t())
+                loss = loss_fn(x_batch)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()

@@ -30,6 +30,11 @@ import torch
 
 from zflows.core.transforms import FreeFormJacobianTransform, CircularShiftTransform
 from zflows.flow import NSF, NCSF, CNF, RealNVP, Flow, ComposedTransform
+from zflows.utils import suppress_warnings
+
+# Silence Triton/Inductor/Dynamo/Python warnings. No cache-limit bump needed:
+# this verification suite does not call torch.compile directly.
+suppress_warnings()
 
 
 def banner(s: str) -> None:

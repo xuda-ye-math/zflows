@@ -17,17 +17,20 @@ into one banner-separated harness. Sections:
 """
 
 import math
-import os
-
-# Compile-related env vars keep logs clean for the enable_eval / compiled
-# paths exercised in HMC §B and the Armijo path in §C.
-os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "0")
-os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
 
 import torch
 
 from zflows.potential import Gaussian, Potential
-from zflows.utils import hmc, langevin, lbfgs, optimization
+from zflows.utils import (
+    hmc, langevin, lbfgs, optimization,
+    set_cache_size_limit, suppress_warnings,
+)
+
+# Silence Triton autotune / Inductor / Dynamo / Python warnings; give Dynamo
+# generous cache headroom since multiple Gaussian / Quartic instances in
+# §B / §C each trigger their own enable_grad / enable_eval compile.
+suppress_warnings()
+set_cache_size_limit(64)
 
 
 def banner(s: str) -> None:

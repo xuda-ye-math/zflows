@@ -3,14 +3,21 @@
 from pathlib import Path
 import math
 import torch
-import os
-os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "0")
-os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1") # cleaner logs
 
 from zflows.flow import NCSF
 from zflows.potential import Potential, Uniform
+import zflows.loss
 from zflows.loss import reverse_KL
-from zflows.utils import resample, compute_ESS_log, rejuvenation, importance_weights_log
+from zflows.utils import (
+    resample, compute_ESS_log, rejuvenation, importance_weights_log,
+    set_cache_size_limit, suppress_warnings,
+)
+
+# Silence Triton autotune / Inductor / Dynamo / Python warnings, and give
+# Dynamo enough cache headroom for the few compiled functions this script
+# creates (one loss.compile + enable_grad + enable_eval).
+suppress_warnings()
+set_cache_size_limit(16)
 
 HERE = Path(__file__).resolve().parent
 
@@ -53,6 +60,12 @@ EPOCH: int = 20 # number of epochs
 x = u0.samples(N) # generate samples
 optimizer = torch.optim.Adam(flow.parameters(), lr=LR)
 
+# Compile the reverse-KL training step once. F = flow.t() is captured here
+# but the lazy machinery re-reads flow's nn.Parameters by attribute access
+# on every forward, so optimizer.step() updates flow correctly.
+F = flow.t()
+loss_fn = zflows.loss.compile(reverse_KL, u1, F)
+
 for epoch in range(EPOCH):
     perm = torch.randperm(N, device=device)
     epoch_loss = 0.0
@@ -61,7 +74,7 @@ for epoch in range(EPOCH):
         idx = perm[start:start + BATCH]
         x_batch = x[idx]
 
-        loss = reverse_KL(x_batch, target=u1, F=flow.t())
+        loss = loss_fn(x_batch)
 
         optimizer.zero_grad()
         loss.backward()
@@ -88,10 +101,6 @@ print(f"ESS = {ess.item():.4f}")
 with torch.no_grad():
     w = (log_w - log_w.max()).exp() # normalize-stable weights
     y_resampled = resample(y_plot, w)
-
-import os
-os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "0")
-os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1") # cleaner logs
 
 u1.enable_eval() # for faster MALA
 u1.enable_grad() # opt-in: build .grad(x) only when needed

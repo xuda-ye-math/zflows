@@ -21,17 +21,17 @@ harness. Sections:
           verification.
 """
 
-import os
-
-os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "0")
-os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
-
 from pathlib import Path
 
 import torch
 
 from zflows.potential import Gaussian, Linear_Combination, Potential
-from zflows.utils import langevin
+from zflows.utils import langevin, set_cache_size_limit, suppress_warnings
+
+# Silence Triton/Inductor/Dynamo/Python warnings; cache headroom for the
+# Gaussian + Linear_Combination .enable_grad / .enable_eval compiles.
+suppress_warnings()
+set_cache_size_limit(32)
 
 
 def banner(s: str) -> None:
