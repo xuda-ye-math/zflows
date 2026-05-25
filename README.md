@@ -5,7 +5,7 @@
 
 PyTorch normalizing flows for unconditional energy-based sampling and Boltzmann generator.
 
-> **Status: experimental.** Tested only on **Linux + NVIDIA GPU**. On Windows, please use [WSL](https://github.com/microsoft/WSL) or avoid `Potential.enable_grad` — `torch.compile` is not supported there (see [pytorch/pytorch#167062](https://github.com/pytorch/pytorch/issues/167062)).
+> **Status: experimental.** Tested only on **Linux + NVIDIA GPU**. On Windows, please use [WSL](https://github.com/microsoft/WSL) or do not use any compile features — `torch.compile` is not supported there (see [pytorch/pytorch#167062](https://github.com/pytorch/pytorch/issues/167062)).
 >
 > This project was developed with [Claude Code](https://claude.com/claude-code).
 
@@ -34,9 +34,7 @@ y, ladj = F.call_and_ladj(x) # forward & log|det J|
 x_back = F.inv(y) # inverse
 ```
 
-Swapping one flow class for another is a one-line change. Per-class hyperparameters are documented in [`flow.py`](zflows/flow.py). Every flow class also exposes `flow.zeros()`, which initialises the network so that the flow map is exactly the identity.
-
-**Mixing strategy — `randmask`.** `NSF`, `NCSF`, and `RealNVP` share a unified `randmask: bool = True` parameter that controls how per-layer feature ordering is generated. With `randmask=True` (the default) every layer draws a fresh `torch.randperm(d)` — the autoregressive ordering for `NSF` / `NCSF`, the checkered mask for `RealNVP` — which breaks the bipartite symmetry of the legacy `arange(d) / arange(d).flip(0)` alternation and is recommended at `d ≥ 4`. Set `randmask=False` for the alternating scheme (the prior behaviour). Reproducibility is via a global `torch.manual_seed(...)` before flow construction in either case.
+Swapping one flow class for another is a one-line change. Per-class hyperparameters are documented in [`flow.py`](zflows/flow.py). Every flow class also exposes `flow.zeros()`, which initialises the network so that the flow map is exactly the identity. The `randmask: bool = True` parameter shared by `NSF`, `NCSF`, and `RealNVP` controls per-layer feature ordering — `True` (default) draws a fresh `torch.randperm(d)` each layer (recommended at $d \geq 4$), `False` uses the legacy `arange / arange.flip` alternation; seed externally with `torch.manual_seed(...)` for reproducibility.
 
 **Precompiled gradients on `Potential`.** Any subclass of `Potential` opts into a `torch.compile`-compiled `vmap(grad(u))` with a single call:
 
@@ -55,7 +53,22 @@ g = u.grad(x) # x: [N, d] -> g: [N, d], no requires_grad_ on x needed
 
 The gradient closure is built once, cached on the instance, and reused every call — making heavy-load Langevin / MALA sampling fast (one fused kernel per step instead of an autograd graph rebuild). The call is idempotent and chainable; calling `.grad()` without `.enable_grad()` raises a clear `RuntimeError`.
 
-**One-line KL losses.** `reverse_KL(x, target, F)` and `forward_KL(y, source, F)` are direct-call functions returning a scalar loss — drop them straight into a training loop, no boilerplate. `F = flow.t()` is the bijection (a `ComposedTransform`).
+**One-line compilable KL losses.** `reverse_KL(x, target, F)` and `forward_KL(y, source, F)` are direct-call functions returning a scalar loss. For heavy-load training (e.g. annealed Boltzmann generators with thousands of steps per bridge) wrap the loss once with `zflows.loss.compile(...)` to capture `(potential, transform)` as closure constants and fuse the forward into a CUDA graph — typically **4–10× faster per training step** ([benchmark](tests/compare_compiled_loss.md)):
+
+```python
+from zflows.loss import reverse_KL
+import zflows.loss
+
+F = flow.t()                                  # captured once; lazy machinery
+                                              # picks up optimizer.step() updates
+loss_fn = zflows.loss.compile(reverse_KL, u1, F, mode='reduce-overhead')
+
+for x_batch in batches:
+    loss = loss_fn(x_batch)
+    optimizer.zero_grad(); loss.backward(); optimizer.step()
+```
+
+The first few steps pay a one-time Triton / Inductor compile cost; every step after that is a single fused kernel replay. `mode='default'` is the safe choice; `mode='reduce-overhead'` uses CUDA Graphs and is fastest at small $d$. Pair with `zflows.utils.suppress_warnings()` to silence the compile-time chatter.
 
 **SMC-style utilities.** Direct-call building blocks for the *propose → reweight → resample → rejuvenate* loop:
 
@@ -196,7 +209,40 @@ python -m tests.2D_forward_KL
 </details>
 
 <details open>
-<summary><strong>3. Periodic target with rejuvenation</strong></summary>
+<summary><strong>3. Compiled vs. raw loss benchmark</strong></summary>
+
+[`tests/compare_compiled_loss.py`](tests/compare_compiled_loss.py) (writeup: [`tests/compare_compiled_loss.md`](tests/compare_compiled_loss.md)) sweeps `NSF` across a $d \times \texttt{hidden\_features}$ grid and times the *full* training step (forward + `backward()` + `Adam.step()`) in three modes: raw `reverse_KL(x, target, flow.t())`, `zflows.loss.compile(...)` with `mode='default'`, and with `mode='reduce-overhead'` (CUDA Graphs). The captured-once trick — pass `F = flow.t()` as a closure constant so Dynamo sees a stable object identity across iterations — turns what looks like a Python-overhead-bound workload at small $d$ into a fused CUDA-graph replay.
+
+```bash
+python -m tests.compare_compiled_loss
+```
+
+Result on an RTX 5070 Ti (committed [`tests/compare_compiled_loss.csv`](tests/compare_compiled_loss.csv)), mean ms per training step over 100 timed steps:
+
+| $d$ | `hidden_features` | raw ms | default ms | reduce ms | speedup default | speedup reduce |
+|----:|:------------------|------:|----------:|---------:|--------------:|--------------:|
+|   2 | (64, 64)          |  6.05 |      1.24 |     0.46 |          4.86 |         13.25 |
+|   2 | (128, 128)        |  5.99 |      1.24 |     0.46 |          4.85 |         13.03 |
+|   2 | (256, 256)        |  6.00 |      1.26 |     0.61 |          4.78 |          9.88 |
+|   4 | (64, 64)          |  6.00 |      1.34 |     0.47 |          4.48 |         12.92 |
+|   4 | (128, 128)        |  6.00 |      1.25 |     0.49 |          4.80 |         12.36 |
+|   4 | (256, 256)        |  6.02 |      1.38 |     0.73 |          4.36 |          8.25 |
+|   8 | (64, 64)          |  5.96 |      1.39 |     0.54 |          4.28 |         10.96 |
+|   8 | (128, 128)        |  5.38 |      1.40 |     0.58 |          3.85 |          9.31 |
+|   8 | (256, 256)        |  5.55 |      1.39 |     0.85 |          4.00 |          6.52 |
+|  16 | (64, 64)          |  6.83 |      1.39 |     0.65 |          4.91 |         10.50 |
+|  16 | (128, 128)        |  6.94 |      1.44 |     0.80 |          4.83 |          8.71 |
+|  16 | (256, 256)        |  7.24 |      1.33 |     1.10 |          5.44 |          6.60 |
+|  32 | (64, 64)          | 12.24 |      1.26 |     1.05 |          9.74 |         11.67 |
+|  32 | (128, 128)        | 12.33 |      1.28 |     1.21 |          9.65 |         10.16 |
+|  32 | (256, 256)        | 12.81 |      1.70 |     1.67 |          7.56 |          7.65 |
+
+The raw baseline is flat at ~5–6 ms for $d \leq 16$ regardless of `hidden_features` — diagnostic of Python-overhead-bound code, not GPU-bound compute. `reduce-overhead` consistently delivers 6.5–13× per-step speedup; `default` mode (no CUDA Graphs) delivers 4–10×. The speedup persists at the largest cell ($d=32$, $hf=(256, 256)$) at ~7.6×, well past the point where the bottleneck shifts from Python to compute. See the [writeup](tests/compare_compiled_loss.md) for the methodology (warmup, sanity check, cache-size limits) and three observations on how the gap scales.
+
+</details>
+
+<details open>
+<summary><strong>4. Periodic target with rejuvenation</strong></summary>
 
 [`tests/3D_periodic.py`](tests/3D_periodic.py) (writeup: [`tests/3D_periodic.md`](tests/3D_periodic.md)) trains an `NCSF` on a von-Mises ridge mixture on the 3-torus $[-\pi, \pi]^3$, then runs the full pipeline: importance sampling → resample → `enable_grad` → Langevin rejuvenation.
 
@@ -209,7 +255,7 @@ python -m tests.3D_periodic
 </details>
 
 <details open>
-<summary><strong>4. Annealed Boltzmann generator (4D, two repelling charges)</strong></summary>
+<summary><strong>5. Annealed Boltzmann generator (4D, two repelling charges)</strong></summary>
 
 [`tests/4D_Boltzmann_generator.py`](tests/4D_Boltzmann_generator.py) (writeup: [`tests/4D_Boltzmann_generator.md`](tests/4D_Boltzmann_generator.md)) trains an `NSF` on the 4D target of two charges in $\mathbb R^2$ confined to a soft annulus and repelling via a regularized 3D Coulomb. A direct flow proposal would have $\mathrm{ESS} \approx 0$, so we anneal: build $M{=}12$ bridge potentials $U_k = (1-c_k)U_0 + c_k U_1$ via `Linear_Combination`, and at each rung run *resample → reverse KL train → IS → resample → MALA rejuvenation* with the same flow warm-started across rungs. The figure shows the marginal annulus forming (top row) and the joint relative-angle distribution $\Delta\theta = \theta_2 - \theta_1$ on $S^1$ shifting from uniform at $k=0$ to peaked at $\pm\pi$ at $k=12$ — the antipodal Coulomb minimum.
 
@@ -222,7 +268,7 @@ python -m tests.4D_Boltzmann_generator
 </details>
 
 <details open>
-<summary><strong>5. Continuous normalizing flow on two moons (CNF / FFJORD)</strong></summary>
+<summary><strong>6. Continuous normalizing flow on two moons (CNF / FFJORD)</strong></summary>
 
 [`tests/2D_two_moon_CNF.py`](tests/2D_two_moon_CNF.py) (writeup: [`tests/2D_two_moon_CNF.md`](tests/2D_two_moon_CNF.md)) trains a `CNF` (FFJORD-style continuous normalizing flow) by forward KL on samples from the classic two-moons distribution — a target whose interlocking-arc topology cannot be separated along any axis. The point of this test is to (i) exercise the `CNF` class on a target where its smooth, non-axis-aligned deformation actually pays off, and (ii) make the CNF/NSF trade-off concrete: closed-form O(d) splines vs. an adaptive ODE flow that buys topological flexibility at the cost of 50–500× slower importance sampling. The writeup includes a side-by-side comparison of the two flow classes across the operations a typical energy-based pipeline performs.
 
@@ -235,7 +281,7 @@ python -m tests.2D_two_moon_CNF
 </details>
 
 <details open>
-<summary><strong>6. RealNVP latent-space interpolation</strong></summary>
+<summary><strong>7. RealNVP latent-space interpolation</strong></summary>
 
 [`tests/2D_RealNVP_latent_interpolation.py`](tests/2D_RealNVP_latent_interpolation.py) (writeup: [`tests/2D_RealNVP_latent_interpolation.md`](tests/2D_RealNVP_latent_interpolation.md)) trains a `RealNVP` by forward KL on a 4-corner Gaussian mixture, then exercises the bijection in the *inverse* direction: pull each mode center back to the latent space via $z = F^{-1}(x)$, draw straight lines between latent anchors, and decode them with $F$. The decoded curves bend through the data manifold rather than cutting straight across the gaps — the canonical RealNVP morphing demo from Dinh et al. (2016), reduced to 2D so the latent and data spaces are both visible. This is the only test in the folder that puts $F^{-1}$ in the foreground, and the script runs end-to-end only because RealNVP's inverse and log-determinant are *closed-form* and $O(d)$ — repeating it with NSF (bisection inverse) or CNF (adaptive ODE) would be visibly slower.
 
@@ -254,9 +300,29 @@ python -m tests.2D_RealNVP_latent_interpolation
 
 **Linux + NVIDIA GPU is required.** The package has been tested on **Ubuntu**, **Arch**, and **WSL** (Windows Subsystem for Linux); other major Linux distributions should work as well as long as a CUDA-enabled PyTorch build is available.
 
-Native Windows is **not** supported: `torch.compile` — the backbone of the `Potential.enable_grad` / `Potential.enable_eval` fast paths — does not run on Windows, see [pytorch/pytorch#167062](https://github.com/pytorch/pytorch/issues/167062). On Windows machines, either use [WSL](https://github.com/microsoft/WSL) (recommended) or avoid the `enable_grad` / `enable_eval` opt-ins entirely (you will then fall back to standard autograd for `Potential` gradients, which is slower but functionally equivalent).
+Native Windows is **not** supported: `torch.compile` — the backbone of `Potential.enable_grad`, `Potential.enable_eval`, **and `zflows.loss.compile`** — does not run on Windows, see [pytorch/pytorch#167062](https://github.com/pytorch/pytorch/issues/167062). On Windows machines, either use [WSL](https://github.com/microsoft/WSL) (recommended) or avoid every compile entry point: skip `enable_grad` / `enable_eval` (fall back to standard autograd for `Potential` gradients) and skip `zflows.loss.compile` (call `reverse_KL(x, target, flow.t())` raw in your training loop instead). The un-compiled paths are slower but functionally equivalent — every numerical result the test suite produces is identical with or without compile.
 
 macOS is untested. The pure-Python flow / loss code should import and run on the CPU, but the compiled fast paths target CUDA and have not been exercised on Apple Silicon.
+
+</details>
+
+<details>
+<summary><strong>Q: How do I check whether <code>torch.compile</code> will actually work in my environment before I burn an hour on training?</strong></summary>
+
+Run `zflows.utils.check_compile_available()` interactively (or in a one-off standalone script — don't put it in your main training code, since each call really invokes `torch.compile` and consumes a Dynamo cache slot):
+
+```python
+>>> import zflows
+>>> zflows.utils.check_compile_available()
+[OK ]   OS = Linux
+[OK ]   nvcc = /opt/cuda/bin/nvcc
+[OK ]   sanity test passed (device=cuda, mode=reduce-overhead)
+True
+```
+
+It runs three checks: (1) OS is Linux — non-Linux emits a warning but doesn't fail; (2) `nvcc` is on `$PATH` — warns if missing; (3) **the authoritative step**: actually `torch.compile`'s a small probe function under the same `mode='reduce-overhead'` zflows uses internally, and returns `True` iff that succeeds.
+
+The first two checks are warnings only; the bool return value reflects only the sanity test. Failure on (2) is the most common cause of the "C compiler not found" / "`nvcc` not found" errors that surface on the first call to `Potential.enable_grad` / `Potential.enable_eval`. To fix that:
 
 </details>
 
@@ -265,29 +331,54 @@ macOS is untested. The pure-Python flow / loss code should import and run on the
 
 You need the **CUDA Toolkit** installed, not just the CUDA runtime that ships with the PyTorch wheel. `torch.compile` (used inside `Potential.enable_grad` / `Potential.enable_eval`) invokes Triton / TorchInductor, which JIT-compiles a small CUDA helper at first call — and that step requires the NVIDIA C/C++ compiler `nvcc` from the CUDA Toolkit. Without it, Triton has no compiler to drive and you see a "C compiler not found" (or "`nvcc` not found") error.
 
-Install the toolkit through your distro's package manager (e.g. `cuda-toolkit` on Ubuntu/Arch) or from [NVIDIA's downloads page](https://developer.nvidia.com/cuda-downloads), then make sure `nvcc --version` works from your shell before re-running.
+Install the toolkit through your distro's package manager (e.g. `cuda-toolkit` on Ubuntu/Arch) or from [NVIDIA's downloads page](https://developer.nvidia.com/cuda-downloads), then make sure `nvcc --version` works from your shell before re-running. `zflows.utils.check_compile_available()` (above) is the fastest way to confirm the fix worked.
 
 </details>
 
 <details>
-<summary><strong>Q: My runs print a wall of <code>_POSIX_C_SOURCE redefined</code> warnings from <code>cuda_utils.c</code>. How do I silence them?</strong></summary>
+<summary><strong>Q: My runs are buried under warnings — <code>_POSIX_C_SOURCE redefined</code>, Triton autotune banners, TF32 hints, Dynamo recompile logs. How do I silence them all?</strong></summary>
 
-Put these two lines at the very top of your script, **before** `import torch`:
+Put one line at the top of your script, before any `torch.compile` invocation:
 
 ```python
-import os
-os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "0")
-os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")  # cleaner logs
+from zflows.utils import suppress_warnings
+suppress_warnings()
 ```
 
-These warnings come from the C compiler invoked by Triton / TorchInductor when `torch.compile` (used inside `Potential.enable_grad` / `Potential.enable_eval`) JIT-builds a CUDA helper. On some Linux distributions — typically those with a recent glibc (Arch, Fedora, etc.) — the system headers already define `_POSIX_C_SOURCE` at a higher level than the Python headers expect, so GCC emits a redefinition warning for every kernel autotuned and every compile thread. The warnings are harmless (the build succeeds and the kernel runs correctly), but they swamp the log.
+This is the single entry point that turns off **all four orthogonal layers of noise** the PyTorch / Triton / Inductor stack emits during a typical compile-heavy training run:
 
-The two env vars don't change the warnings themselves; they prune the messages around them:
+1. **Python `UserWarning`s** — e.g. inductor's TF32 hint, `torch.distributions` deprecation notes — silenced via `warnings.filterwarnings("ignore")`.
+2. **Dynamo log channels** — `recompiles` and `graph_breaks` — silenced via `torch._logging.set_logs(recompiles=False, graph_breaks=False)`.
+3. **Triton autotune stderr** — the per-kernel `AUTOTUNE addmm(...)` banners that Triton's C-side autotuner writes directly to stderr (Python's `warnings` filter can't catch these) — silenced via `TRITON_PRINT_AUTOTUNING=0`.
+4. **Inductor compile-worker interleaving** — the `_POSIX_C_SOURCE redefined` warnings emitted by GCC for every kernel autotuned, plus other gcc/nvcc diagnostics — serialised to one worker via `TORCHINDUCTOR_COMPILE_THREADS=1`, so any remaining diagnostic comes out cleanly instead of as interleaved gibberish across N workers.
 
-- `TRITON_PRINT_AUTOTUNING=0` mutes Triton's per-kernel autotune banner that re-prints the compile output.
-- `TORCHINDUCTOR_COMPILE_THREADS=1` serializes the Inductor compile workers, so any remaining diagnostic is printed once instead of N times in interleaved chunks.
+These layers are orthogonal: Python warning filters don't catch stderr writes from Triton's C side, and `torch._logging` doesn't catch GCC diagnostics. `suppress_warnings()` covers all four; the env-var-based pieces (#3 and #4) only take effect for *future* compiles, so call this before any `torch.compile` / `Potential.enable_grad` / `Potential.enable_eval` / `zflows.loss.compile` invocation.
 
-You can see this in action in [`tests/3D_periodic.py`](tests/3D_periodic.py) and [`tests/_verify_utils.py`](tests/_verify_utils.py).
+The function is idempotent and safe to call multiple times. Real compile *failures* still raise — only routine noise is muted. You can see it in action at the top of every test script in [`tests/`](tests/) (e.g. [`tests/3D_periodic.py`](tests/3D_periodic.py), [`tests/_verify_utils.py`](tests/_verify_utils.py)).
+
+</details>
+
+<details>
+<summary><strong>Q: My custom loss function doesn't match the <code>(x, potential, transform)</code> signature of <code>reverse_KL</code> / <code>forward_KL</code> — how do I compile it?</strong></summary>
+
+`zflows.loss.compile(loss_fn, *captured, mode='default')` is variadic — it captures every positional argument after `loss_fn` as a closure constant, so any callable of the form `loss_fn(x, *captured) -> scalar` works:
+
+```python
+def my_loss(x, target_potential, transform, beta):
+    y, ladj = transform.call_and_ladj(x)
+    return (beta * target_potential(y) - ladj).mean()
+
+F = flow.t()
+loss_fn = zflows.loss.compile(my_loss, u_target, F, 0.5)   # captured = (u_target, F, 0.5)
+
+for x_batch in batches:
+    loss = loss_fn(x_batch)
+    optimizer.zero_grad(); loss.backward(); optimizer.step()
+```
+
+The pattern that *doesn't* work is `torch.compile(my_loss)` and then passing the flow / potentials as runtime arguments — each call would build a fresh `flow.t()`, Dynamo would re-guard on its object identity, and the cache would either thrash or hit `BACKEND_MATCH` failures. `zflows.loss.compile` sidesteps both by stuffing the Python-heavy arguments into the closure. If you mix multiple distinct loss-function shapes in the same script, raise `torch._dynamo.config.cache_size_limit` (or use the helper `zflows.utils.set_cache_size_limit(N)`) so Dynamo doesn't evict your specializations.
+
+If your loss takes keyword-only arguments or needs more elaborate dispatch, write a thin wrapper that closes over them and pass the wrapper into `zflows.loss.compile`. This is the kind of small mechanical refactor that AI coding assistants (e.g. [Claude Code](https://claude.com/claude-code), which built this project) handle well.
 
 </details>
 
