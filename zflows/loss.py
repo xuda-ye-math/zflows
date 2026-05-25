@@ -1,5 +1,7 @@
 # pyright: reportOperatorIssue=false, reportArgumentType=false, reportAttributeAccessIssue=false
 
+from collections.abc import Callable
+
 import torch
 from .flow import ComposedTransform
 from .potential import Potential
@@ -69,3 +71,64 @@ def target_KL_G(y: torch.Tensor, source: Potential, G: ComposedTransform):
     """
     x, ladj = G.call_and_ladj(y) # x = G(y), ladj = log|det J_G(y)|
     return (source(x) - ladj).mean()
+
+
+def compile(
+    loss_fn: Callable[[torch.Tensor, Potential, ComposedTransform], torch.Tensor],
+    potential: Potential,
+    transform: ComposedTransform,
+    mode: str = 'default',
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    """torch.compile any of the four KL losses, with the heavy-Python
+    arguments baked into a closure.
+
+    The four losses in this module all share the positional signature
+    `(samples, potential, transform) -> scalar`, so a single helper
+    covers them all. `potential` and `transform` are captured as
+    closure constants — torch.compile sees them as static and does
+    NOT re-guard on the fresh `ComposedTransform` that `flow.t()`
+    builds on every call.
+
+    Captured-once correctness:
+        - flow.t() returns a `ComposedTransform` whose inner
+          `AutoregressiveTransform` objects hold *lazy* `meta` callables
+          that read flow parameters via attribute access on every
+          forward pass.
+        - `optimizer.step()` mutates those `nn.Parameter` tensors
+          in-place, so the captured `transform` sees the post-step
+          values without rebuilding.
+        - This works whether or not you compile. Capturing the
+          transform once is in fact a mild speedup even without
+          torch.compile (saves the per-batch object construction).
+
+    Caveats:
+        - mode='default' is safe; mode='reduce-overhead' uses CUDA
+          graphs (faster but needs static batch size and stable
+          parameter memory; do not call `flow.zeros()` mid-training).
+        - Build this AFTER any `potential.enable_grad()` /
+          `enable_eval()` so the compiled graph wraps the fast paths.
+        - Dynamo retraces on tensor-shape changes. Keep `BATCH` fixed.
+
+    Arguments:
+        loss_fn:   one of {source_KL_F, source_KL_G, target_KL_F,
+                   target_KL_G} or the aliases reverse_KL / forward_KL.
+        potential: the target (for source_KL_*) or source (for
+                   target_KL_*) — whatever `loss_fn` expects as its
+                   second positional argument.
+        transform: the ComposedTransform to bake in. Typically `flow.t()`.
+        mode:      torch.compile mode. Default 'default'.
+
+    Returns:
+        callable (x_batch: Tensor) -> scalar loss.
+
+    Example:
+        F = flow.t()
+        loss = zflows.loss.compile(reverse_KL, u1, F)
+        for x_batch in batches:
+            l = loss(x_batch)
+            optimizer.zero_grad(); l.backward(); optimizer.step()
+    """
+    @torch.compile(mode=mode)
+    def compiled(x: torch.Tensor) -> torch.Tensor:
+        return loss_fn(x, potential, transform)
+    return compiled
