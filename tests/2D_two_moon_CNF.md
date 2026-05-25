@@ -44,12 +44,12 @@ python -m tests.2D_two_moon_CNF
 
 Pointers into the script:
 
-- imports & device setup: [`2D_two_moon_CNF.py:1-8`](2D_two_moon_CNF.py#L1-L8)
-- source ($\mathcal N(0, I_2)$) and `two_moons_samples` helper: [`2D_two_moon_CNF.py:10-23`](2D_two_moon_CNF.py#L10-L23)
-- CNF init: [`2D_two_moon_CNF.py:26`](2D_two_moon_CNF.py#L26)
-- training parameters & cosine LR schedule: [`2D_two_moon_CNF.py:28-37`](2D_two_moon_CNF.py#L28-L37)
-- training loop (mini-batched forward KL): [`2D_two_moon_CNF.py:39-58`](2D_two_moon_CNF.py#L39-L58)
-- plotting (source / pushforward / target): [`2D_two_moon_CNF.py:60-90`](2D_two_moon_CNF.py#L60-L90)
+- imports + `suppress_warnings` + device setup: [`2D_two_moon_CNF.py:1-11`](2D_two_moon_CNF.py#L1-L11)
+- source ($\mathcal N(0, I_2)$) and `two_moons_samples` helper: [`2D_two_moon_CNF.py:13-26`](2D_two_moon_CNF.py#L13-L26)
+- CNF init: [`2D_two_moon_CNF.py:29`](2D_two_moon_CNF.py#L29)
+- training parameters & cosine LR schedule: [`2D_two_moon_CNF.py:31-40`](2D_two_moon_CNF.py#L31-L40)
+- training loop (mini-batched forward KL): [`2D_two_moon_CNF.py:42-61`](2D_two_moon_CNF.py#L42-L61)
+- plotting (source / pushforward / target): [`2D_two_moon_CNF.py:63-93`](2D_two_moon_CNF.py#L63-L93)
 
 <p align="center"><img src="2D_two_moon_CNF.png" alt="2D two-moons CNF test" width="700px"></p>
 

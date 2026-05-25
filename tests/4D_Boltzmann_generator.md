@@ -24,7 +24,7 @@ $$
 with $\mu_k \propto \exp(-U_k)$. Each rung's training step does five things, in order:
 
 1. **Resample.** Draw a working set $x_{\mathrm{train}, k-1}$ of size $N_{\mathrm{train}}$ uniformly with replacement from the previous rung's particle cloud $x_{\mathrm{valid}, k-1} \sim \mu_{k-1}$.
-2. **Train.** Update the *single* shared flow to minimize reverse KL from $\mu_{k-1}$ to $\mu_k$, treating $x_{\mathrm{train}, k-1}$ as samples from the source. The $U_{k-1}(x)$ term is parameter-independent and drops out of the gradient, so `reverse_KL(x, target=U_k, F=flow.t())` is the correct loss as-is.
+2. **Train.** Update the *single* shared flow to minimize reverse KL from $\mu_{k-1}$ to $\mu_k$, treating $x_{\mathrm{train}, k-1}$ as samples from the source. The $U_{k-1}(x)$ term is parameter-independent and drops out of the gradient, so reverse KL against $U_k$ alone is the correct loss. The script wraps this in `zflows.loss.compile(reverse_KL, U_curr, F)` once per rung, where $F = \texttt{flow.t()}$ is captured **before the rung loop starts** (the lazy `Transform` machinery re-reads `flow.parameters()` via attribute access each forward, so updates from `optimizer.step()` propagate without rebuilding $F$). Only $U_{\text{curr}}$ changes per rung, so the inner closure picks up exactly $M = 12$ Dynamo specializations across the run — comfortably under the `set_cache_size_limit(32)` ceiling set at the top of the script. The first batch of each rung pays a one-time compile cost (Dynamo trace + Inductor lowering + Triton autotune); every subsequent batch in that rung is a single fused CUDA-graph replay, so per-step training time drops sharply after the warmup.
 3. **Importance sample.** Push the full validation set $x_{\mathrm{valid}, k-1}$ through $F$ to get proposals $y$ and log-weights $\log w = -U_k(y) + U_{k-1}(x_{\mathrm{valid}, k-1}) + \log|\det J_F|$ via `importance_weights_log(samples, source=U_{k-1}, target=U_k, F=flow.t())`. Report the ESS as a self-test for this rung.
 4. **Resample by weight.** Multinomial draw to convert the weighted cloud into an equally-weighted cloud $\tilde y$.
 5. **Rejuvenate.** Run MALA (Metropolis-adjusted Langevin) against $U_k$ to break duplicate particles and remove residual proposal bias. The script opts in to **both** compiled fast paths on the bridge potential — `U_k.enable_grad()` for the gradient $\nabla U_k$ used in the proposal, and `U_k.enable_eval()` for the energy $U_k$ used in the accept/reject step — so each MALA iteration is two fused kernel calls instead of two autograd-graph rebuilds. Output $x_{\mathrm{valid}, k}$ for the next rung.
@@ -49,14 +49,15 @@ python -m tests.4D_Boltzmann_generator
 
 Pointers into the script:
 
-- imports, env vars, device & seed: [`4D_Boltzmann_generator.py:1–17`](4D_Boltzmann_generator.py#L1-L17)
-- source (4D Gaussian) and target ($U_1$ class): [`4D_Boltzmann_generator.py:19–48`](4D_Boltzmann_generator.py#L19-L48)
-- `.pth` cache: training is skipped on subsequent runs by loading `4D_Boltzmann_generator.pth`: [`4D_Boltzmann_generator.py:50–57`](4D_Boltzmann_generator.py#L50-L57)
-- training branch — flow init, validation cloud, ladder $c_k$: [`4D_Boltzmann_generator.py:58–86`](4D_Boltzmann_generator.py#L58-L86)
-- per-rung loop (5 steps: resample → train → IS → resample → MALA): [`4D_Boltzmann_generator.py:92–136`](4D_Boltzmann_generator.py#L92-L136)
-- saving the cache: [`4D_Boltzmann_generator.py:138–144`](4D_Boltzmann_generator.py#L138-L144)
-- ESS history printout: [`4D_Boltzmann_generator.py:146–150`](4D_Boltzmann_generator.py#L146-L150)
-- two-row visualization (Cartesian + polar): [`4D_Boltzmann_generator.py:152–217`](4D_Boltzmann_generator.py#L152-L217)
+- imports + `suppress_warnings` / `set_cache_size_limit(32)`: [`4D_Boltzmann_generator.py:1–18`](4D_Boltzmann_generator.py#L1-L18)
+- source (4D Gaussian) and target ($U_1$ class): [`4D_Boltzmann_generator.py:21–56`](4D_Boltzmann_generator.py#L21-L56)
+- `.pth` cache: training is skipped on subsequent runs by loading `4D_Boltzmann_generator.pth`: [`4D_Boltzmann_generator.py:58–65`](4D_Boltzmann_generator.py#L58-L65)
+- training branch — flow init, validation cloud, ladder $c_k$: [`4D_Boltzmann_generator.py:66–93`](4D_Boltzmann_generator.py#L66-L93)
+- captured $F = \texttt{flow.t()}$ (reused across rungs): [`4D_Boltzmann_generator.py:96–101`](4D_Boltzmann_generator.py#L96-L101)
+- per-rung loop (5 steps: resample → compile + train → IS → resample → MALA): [`4D_Boltzmann_generator.py:107–152`](4D_Boltzmann_generator.py#L107-L152)
+- saving the cache: [`4D_Boltzmann_generator.py:159–164`](4D_Boltzmann_generator.py#L159-L164)
+- ESS history printout: [`4D_Boltzmann_generator.py:167–171`](4D_Boltzmann_generator.py#L167-L171)
+- two-row visualization (Cartesian + polar): [`4D_Boltzmann_generator.py:188–218`](4D_Boltzmann_generator.py#L188-L218)
 
 The first invocation runs the annealing ($M = 12$ rungs of training + IS + MALA) and saves a `.pth` cache containing `x_valid_history` (M+1 snapshots) and `ess_history` (M floats). Subsequent invocations load the cache and skip directly to the visualization.
 
@@ -87,10 +88,11 @@ The figure below plots the validation particles at $k = 0, 4, 8, 12$ in two rows
 **What this test demonstrates about `zflows`.** This is the smallest example that exercises every component end-to-end:
 
 - `Linear_Combination` builds the bridge potentials with a single coefficient parameter that can be reused at every rung;
-- `reverse_KL` is the per-rung loss without any modification (the source-energy term drops out automatically);
+- `reverse_KL` is the per-rung loss without any modification (the source-energy term drops out automatically), and `zflows.loss.compile(reverse_KL, U_curr, F)` wraps it once per rung so every batch after the first runs in a fused CUDA graph;
 - `importance_weights_log` is the one-call IS reweighting against the just-trained flow, ready to feed into `compute_ESS_log` for the per-rung diagnostic;
 - `resample` converts weighted clouds to equal-weight ones for the next rung;
 - `Potential.enable_grad()` and `.enable_eval()` provide the compiled gradient and forward fast paths that MALA (`rejuvenation` with `adjust=True`) uses for the proposal and the accept/reject step respectively;
-- `NSF` provides the spline bijection on the rectangular box, with one set of parameters re-used across all $M$ rungs (warm-start fine-tuning).
+- `NSF` provides the spline bijection on the rectangular box, with one set of parameters re-used across all $M$ rungs (warm-start fine-tuning);
+- `zflows.utils.suppress_warnings()` and `set_cache_size_limit(32)` silence the routine Triton / Inductor / Dynamo log noise and give Dynamo enough cache headroom for one compiled loss per bridge ($M = 12$ entries) plus the `enable_grad` / `enable_eval` specializations.
 
 The full pipeline is the *propose → reweight → resample → rejuvenate* loop that drives every modern flow-augmented SMC sampler — packaged here in the smallest dimension where you can still see it work.

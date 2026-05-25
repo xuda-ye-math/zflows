@@ -61,13 +61,13 @@ python -m tests.2D_reverse_KL
 
 Pointers into the script:
 
-- imports & device setup: [`2D_reverse_KL.py:1–8`](2D_reverse_KL.py#L1-L8)
-- source and target potentials: [`2D_reverse_KL.py:10–22`](2D_reverse_KL.py#L10-L22)
-- flow init: [`2D_reverse_KL.py:25`](2D_reverse_KL.py#L25)
-- training parameters: [`2D_reverse_KL.py:27–31`](2D_reverse_KL.py#L27-L31)
-- training loop (mini-batched reverse KL): [`2D_reverse_KL.py:33–54`](2D_reverse_KL.py#L33-L54)
-- IS reweighting + $\mathrm{ESS}$: [`2D_reverse_KL.py:57–68`](2D_reverse_KL.py#L57-L68)
-- plotting: [`2D_reverse_KL.py:70–93`](2D_reverse_KL.py#L70-L93)
+- imports + `suppress_warnings` + device setup: [`2D_reverse_KL.py:1–11`](2D_reverse_KL.py#L1-L11)
+- source and target potentials: [`2D_reverse_KL.py:13–25`](2D_reverse_KL.py#L13-L25)
+- flow init: [`2D_reverse_KL.py:28`](2D_reverse_KL.py#L28)
+- training parameters: [`2D_reverse_KL.py:30–34`](2D_reverse_KL.py#L30-L34)
+- training loop (mini-batched reverse KL): [`2D_reverse_KL.py:36–57`](2D_reverse_KL.py#L36-L57)
+- IS reweighting + $\mathrm{ESS}$: [`2D_reverse_KL.py:60–71`](2D_reverse_KL.py#L60-L71)
+- plotting: [`2D_reverse_KL.py:73–96`](2D_reverse_KL.py#L73-L96)
 
 <p align="center"><img src="2D_reverse_KL.png" alt="reverse KL test" width="700px"></p>
 

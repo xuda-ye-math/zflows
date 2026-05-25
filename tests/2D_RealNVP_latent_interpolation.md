@@ -58,14 +58,14 @@ python -m tests.2D_RealNVP_latent_interpolation
 
 Pointers into the script:
 
-- imports & device setup: [`2D_RealNVP_latent_interpolation.py:1-9`](2D_RealNVP_latent_interpolation.py#L1-L9)
-- source ($\mathcal N(0, I_2)$) and 4-corner target mixture: [`2D_RealNVP_latent_interpolation.py:11-29`](2D_RealNVP_latent_interpolation.py#L11-L29)
-- RealNVP init: [`2D_RealNVP_latent_interpolation.py:33`](2D_RealNVP_latent_interpolation.py#L33)
-- training parameters: [`2D_RealNVP_latent_interpolation.py:35-39`](2D_RealNVP_latent_interpolation.py#L35-L39)
-- training loop (mini-batched forward KL): [`2D_RealNVP_latent_interpolation.py:41-65`](2D_RealNVP_latent_interpolation.py#L41-L65)
-- pull-back of anchors + round-trip sanity check: [`2D_RealNVP_latent_interpolation.py:67-83`](2D_RealNVP_latent_interpolation.py#L67-L83)
-- 6-pair latent interpolation + decoding: [`2D_RealNVP_latent_interpolation.py:85-99`](2D_RealNVP_latent_interpolation.py#L85-L99)
-- 2×2 plotting: [`2D_RealNVP_latent_interpolation.py:101-152`](2D_RealNVP_latent_interpolation.py#L101-L152)
+- imports + `suppress_warnings` + device setup: [`2D_RealNVP_latent_interpolation.py:1-14`](2D_RealNVP_latent_interpolation.py#L1-L14)
+- source ($\mathcal N(0, I_2)$) and 4-corner target mixture: [`2D_RealNVP_latent_interpolation.py:16-34`](2D_RealNVP_latent_interpolation.py#L16-L34)
+- RealNVP init: [`2D_RealNVP_latent_interpolation.py:38`](2D_RealNVP_latent_interpolation.py#L38)
+- training parameters: [`2D_RealNVP_latent_interpolation.py:40-44`](2D_RealNVP_latent_interpolation.py#L40-L44)
+- training loop (mini-batched forward KL): [`2D_RealNVP_latent_interpolation.py:46-70`](2D_RealNVP_latent_interpolation.py#L46-L70)
+- pull-back of anchors + round-trip sanity check: [`2D_RealNVP_latent_interpolation.py:72-88`](2D_RealNVP_latent_interpolation.py#L72-L88)
+- 6-pair latent interpolation + decoding: [`2D_RealNVP_latent_interpolation.py:90-104`](2D_RealNVP_latent_interpolation.py#L90-L104)
+- 2×2 plotting: [`2D_RealNVP_latent_interpolation.py:106-157`](2D_RealNVP_latent_interpolation.py#L106-L157)
 
 The script asserts that the round-trip $F(F^{-1}(x_k)) \approx x_k$ on the four anchors holds to better than $10^{-4}$, which catches a broken inverse before it can produce nonsense interpolation curves.
 
