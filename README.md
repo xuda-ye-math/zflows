@@ -54,19 +54,19 @@ class U(Potential): # any user-defined energy
 
 The `def __init__(self): super().__init__()` boilerplate is **always recommended**, even when you have no extra state to initialize — skipping it leaves `nn.Module`'s internals uncreated and the next call `u(x)` fails with a cryptic `AttributeError`.
 
-If there are no constructor args and no extra state to worry about, `Potential._from(...)` writes the subclass boilerplate for you from a plain `(x) -> Tensor` callable. It returns the *class*, so you instantiate it the same way you would `Gaussian(...)`:
+If there are no constructor args and no extra state to worry about, `potential_from(...)` writes the subclass boilerplate for you from a plain `(x) -> Tensor` callable. It returns the *class*, so you instantiate it the same way you would `Gaussian(...)`:
 
 ```python
-from zflows.potential import Potential
+from zflows.potential import potential_from
 
 def U_fn(x: torch.Tensor) -> torch.Tensor: # U(x): Tensor [N, d] -> Tensor [N]
     return ...
 
-U = Potential._from(U_fn)   # class — equivalent to writing the subclass by hand
-u = U().to(device)          # instance — full toolchain still works
+U = potential_from(U_fn)   # class — equivalent to writing the subclass by hand
+u = U().to(device)         # instance — full toolchain still works
 ```
 
-(The method name is `_from`, not `from`, because `from` is a Python keyword.) For potentials that carry state — physical constants, learnable sub-modules, etc. — subclass `Potential` directly as above.
+For a single instance in one line, use `potential_instance_from(U_fn).to(device)`. For potentials that carry state — physical constants, learnable sub-modules, etc. — subclass `Potential` directly as above.
 
 For Boltzmann-generator bridges and richer multi-rung mixtures, `Linear_Combination` composes any number of `Potential` instances into a single `U(x) = Σ_k c_k U_k(x)`, evaluated as one chained sum rather than nested compositions:
 
@@ -85,14 +85,14 @@ g = u.grad(x) # x: [N, d] -> g: [N, d], no requires_grad_ on x needed
 
 The gradient closure is built once, cached on the instance, and reused every call — making heavy-load Langevin / MALA sampling fast (one fused kernel per step instead of an autograd graph rebuild). The call is idempotent and chainable; calling `.grad()` without `.enable_grad()` raises a clear `RuntimeError`.
 
-**One-line compilable KL losses.** `reverse_KL(x, target, F)` and `forward_KL(y, source, F)` are direct-call functions returning a scalar loss. For heavy-load training (e.g. annealed Boltzmann generators with thousands of steps per bridge) wrap the loss once with `compile_raw(...)` to capture `(potential, transform)` as closure constants and fuse the forward into a CUDA graph — typically **4–10× faster per training step** ([benchmark](tests/compare_compiled_loss.md)):
+**One-line compilable KL losses.** `reverse_KL(x, target, F)` and `forward_KL(y, source, F)` are direct-call functions returning a scalar loss. For heavy-load training (e.g. annealed Boltzmann generators with thousands of steps per bridge) wrap the loss once with `loss_compile(...)` to capture `(potential, transform)` as closure constants and fuse the forward into a CUDA graph — typically **4–10× faster per training step** ([benchmark](tests/compare_compiled_loss.md)):
 
 ```python
-from zflows.loss import reverse_KL, compile_raw
+from zflows.loss import reverse_KL, loss_compile
 
 F = flow.t()
 
-loss_fn = compile_raw(reverse_KL, target, F, mode='reduce-overhead')
+loss_fn = loss_compile(reverse_KL, target, F, mode='reduce-overhead')
 
 for x_batch in batches:
     loss = loss_fn(x_batch)
@@ -101,12 +101,12 @@ for x_batch in batches:
 
 The first few steps pay a one-time Triton / Inductor compile cost; every step after that is a single fused kernel replay. `mode='default'` is the safe choice; `mode='reduce-overhead'` uses CUDA Graphs and is fastest at small $d$. Pair with `zflows.utils.suppress_warnings()` to silence the compile-time chatter.
 
-If you want to train against a different inverse temperature than the default $\beta = 1$, the direct-call interface accepts it as the last argument — `reverse_KL(x, target, F, beta)` — and the matching compiled version uses `compile_beta` to keep `beta` as a runtime knob (varying it across steps for an annealed / adaptive schedule):
+If you want to train against a different inverse temperature than the default $\beta = 1$, the direct-call interface accepts it as the last argument — `reverse_KL(x, target, F, beta)` — and the matching compiled version uses `loss_compile_beta` to keep `beta` as a runtime knob (varying it across steps for an annealed / adaptive schedule):
 
 ```python
-from zflows.loss import reverse_KL, compile_beta
+from zflows.loss import reverse_KL, loss_compile_beta
 
-loss_fn = compile_beta(reverse_KL, target, F, mode='reduce-overhead')
+loss_fn = loss_compile_beta(reverse_KL, target, F, mode='reduce-overhead')
 
 for x_batch, beta in batches:
     loss = loss_fn(x_batch, beta)
@@ -328,7 +328,7 @@ python -m tests.2D_forward_KL
 <details open>
 <summary><strong>3. Compiled vs. raw loss benchmark</strong></summary>
 
-[`tests/compare_compiled_loss.py`](tests/compare_compiled_loss.py) (writeup: [`tests/compare_compiled_loss.md`](tests/compare_compiled_loss.md)) sweeps `NSF` across a `dimension × hidden_features` grid and times the *full* training step (forward + `backward()` + `Adam.step()`) in three modes: raw `reverse_KL(x, target, flow.t())`, `compile_raw(...)` with `mode='default'`, and with `mode='reduce-overhead'` (CUDA Graphs). The captured-once trick — pass `F = flow.t()` as a closure constant so Dynamo sees a stable object identity across iterations — turns what looks like a Python-overhead-bound workload at small `dimension` into a fused CUDA-graph replay.
+[`tests/compare_compiled_loss.py`](tests/compare_compiled_loss.py) (writeup: [`tests/compare_compiled_loss.md`](tests/compare_compiled_loss.md)) sweeps `NSF` across a `dimension × hidden_features` grid and times the *full* training step (forward + `backward()` + `Adam.step()`) in three modes: raw `reverse_KL(x, target, flow.t())`, `loss_compile(...)` with `mode='default'`, and with `mode='reduce-overhead'` (CUDA Graphs). The captured-once trick — pass `F = flow.t()` as a closure constant so Dynamo sees a stable object identity across iterations — turns what looks like a Python-overhead-bound workload at small `dimension` into a fused CUDA-graph replay.
 
 ```bash
 python -m tests.compare_compiled_loss
@@ -445,7 +445,7 @@ python -m tests.multi_well_compare
 
 **Linux + NVIDIA GPU is required.** The package has been tested on **Ubuntu**, **Arch**, and **WSL** (Windows Subsystem for Linux); other major Linux distributions should work as well as long as a CUDA-enabled PyTorch build is available.
 
-Native Windows is **not** supported: `torch.compile` — the backbone of `Potential.enable_grad`, `Potential.enable_eval`, **and `compile_raw` / `compile_beta`** — does not run on Windows, see [pytorch/pytorch#167062](https://github.com/pytorch/pytorch/issues/167062). On Windows machines, either use [WSL](https://github.com/microsoft/WSL) (recommended) or avoid every compile entry point: skip `enable_grad` / `enable_eval` (fall back to standard autograd for `Potential` gradients) and skip `compile_raw` / `compile_beta` (call `reverse_KL(x, target, flow.t())` raw in your training loop instead). The un-compiled paths are slower but functionally equivalent — every numerical result the test suite produces is identical with or without compile.
+Native Windows is **not** supported: `torch.compile` — the backbone of `Potential.enable_grad`, `Potential.enable_eval`, **and `loss_compile` / `loss_compile_beta`** — does not run on Windows, see [pytorch/pytorch#167062](https://github.com/pytorch/pytorch/issues/167062). On Windows machines, either use [WSL](https://github.com/microsoft/WSL) (recommended) or avoid every compile entry point: skip `enable_grad` / `enable_eval` (fall back to standard autograd for `Potential` gradients) and skip `loss_compile` / `loss_compile_beta` (call `reverse_KL(x, target, flow.t())` raw in your training loop instead). The un-compiled paths are slower but functionally equivalent — every numerical result the test suite produces is identical with or without compile.
 
 macOS is untested. The pure-Python flow / loss code should import and run on the CPU, but the compiled fast paths target CUDA and have not been exercised on Apple Silicon.
 
@@ -467,7 +467,7 @@ True
 
 It runs three checks: (1) OS is Linux — non-Linux emits a warning but doesn't fail; (2) `nvcc` is reachable — `shutil.which("nvcc")` first, then the Ubuntu default install locations `/usr/local/cuda/bin/nvcc` and `/usr/local/cuda-*/bin/nvcc` as fallbacks; warns if none match; (3) **the authoritative step**: actually `torch.compile`'s a small probe function under the same `mode='reduce-overhead'` zflows uses internally, and returns `True` iff that succeeds.
 
-The first two checks are warnings only; the bool return value reflects only the sanity test. Failure on (2) is the most common cause of the "C compiler not found" / "`nvcc` not found" errors that surface on the first call to `Potential.enable_grad` / `Potential.enable_eval` / `compile_raw` / `compile_beta`: `torch.compile` invokes Triton / TorchInductor, which JIT-compiles a small CUDA helper at first call, and that step needs the NVIDIA C/C++ compiler `nvcc` from the **CUDA Toolkit** (not just the CUDA runtime that ships with the PyTorch wheel). Install the toolkit through your distro's package manager or from [NVIDIA's downloads page](https://developer.nvidia.com/cuda-downloads); if the toolkit lives at the Ubuntu default `/usr/local/cuda/bin/nvcc` or `/usr/local/cuda-X.Y/bin/nvcc` the fallback picks it up automatically, otherwise add it to `$PATH` and re-run `check_compile_available()`.
+The first two checks are warnings only; the bool return value reflects only the sanity test. Failure on (2) is the most common cause of the "C compiler not found" / "`nvcc` not found" errors that surface on the first call to `Potential.enable_grad` / `Potential.enable_eval` / `loss_compile` / `loss_compile_beta`: `torch.compile` invokes Triton / TorchInductor, which JIT-compiles a small CUDA helper at first call, and that step needs the NVIDIA C/C++ compiler `nvcc` from the **CUDA Toolkit** (not just the CUDA runtime that ships with the PyTorch wheel). Install the toolkit through your distro's package manager or from [NVIDIA's downloads page](https://developer.nvidia.com/cuda-downloads); if the toolkit lives at the Ubuntu default `/usr/local/cuda/bin/nvcc` or `/usr/local/cuda-X.Y/bin/nvcc` the fallback picks it up automatically, otherwise add it to `$PATH` and re-run `check_compile_available()`.
 
 </details>
 
@@ -488,7 +488,7 @@ This is the single entry point that turns off **all four orthogonal layers of no
 3. **Triton autotune stderr** — the per-kernel `AUTOTUNE addmm(...)` banners that Triton's C-side autotuner writes directly to stderr (Python's `warnings` filter can't catch these) — silenced via `TRITON_PRINT_AUTOTUNING=0`.
 4. **Inductor compile-worker interleaving** — the `_POSIX_C_SOURCE redefined` warnings emitted by GCC for every kernel autotuned, plus other gcc/nvcc diagnostics — serialised to one worker via `TORCHINDUCTOR_COMPILE_THREADS=1`, so any remaining diagnostic comes out cleanly instead of as interleaved gibberish across N workers.
 
-These layers are orthogonal: Python warning filters don't catch stderr writes from Triton's C side, and `torch._logging` doesn't catch GCC diagnostics. `suppress_warnings()` covers all four; the env-var-based pieces (#3 and #4) only take effect for *future* compiles, so call this before any `torch.compile` / `Potential.enable_grad` / `Potential.enable_eval` / `compile_raw` / `compile_beta` invocation.
+These layers are orthogonal: Python warning filters don't catch stderr writes from Triton's C side, and `torch._logging` doesn't catch GCC diagnostics. `suppress_warnings()` covers all four; the env-var-based pieces (#3 and #4) only take effect for *future* compiles, so call this before any `torch.compile` / `Potential.enable_grad` / `Potential.enable_eval` / `loss_compile` / `loss_compile_beta` invocation.
 
 The function is idempotent and safe to call multiple times. Real compile *failures* still raise — only routine noise is muted. You can see it in action at the top of every test script in [`tests/`](tests/) (e.g. [`tests/3D_periodic.py`](tests/3D_periodic.py), [`tests/_verify_utils.py`](tests/_verify_utils.py)).
 
@@ -497,26 +497,26 @@ The function is idempotent and safe to call multiple times. Real compile *failur
 <details>
 <summary><strong>Q: My custom loss function doesn't match the <code>(x, potential, transform)</code> signature of <code>reverse_KL</code> / <code>forward_KL</code> — how do I compile it?</strong></summary>
 
-`compile_raw(loss_fn, *captured, mode='default')` is variadic — it captures every positional argument after `loss_fn` as a closure constant, so any callable of the form `loss_fn(x, *captured) -> scalar` works:
+`loss_compile(loss_fn, *captured, mode='default')` is variadic — it captures every positional argument after `loss_fn` as a closure constant, so any callable of the form `loss_fn(x, *captured) -> scalar` works:
 
 ```python
-from zflows.loss import compile_raw
+from zflows.loss import loss_compile
 
 def my_loss(x, target_potential, transform, scale):
     y, ladj = transform.call_and_ladj(x)
     return (scale * target_potential(y) - ladj).mean()
 
 F = flow.t()
-loss_fn = compile_raw(my_loss, u_target, F, 0.5)   # captured = (u_target, F, 0.5)
+loss_fn = loss_compile(my_loss, u_target, F, 0.5)   # captured = (u_target, F, 0.5)
 
 for x_batch in batches:
     loss = loss_fn(x_batch)
     optimizer.zero_grad(); loss.backward(); optimizer.step()
 ```
 
-The pattern that *doesn't* work is `torch.compile(my_loss)` and then passing the flow / potentials as runtime arguments — each call would build a fresh `flow.t()`, Dynamo would re-guard on its object identity, and the cache would either thrash or hit `BACKEND_MATCH` failures. `compile_raw` sidesteps both by stuffing the Python-heavy arguments into the closure. If you mix multiple distinct loss-function shapes in the same script, raise `torch._dynamo.config.cache_size_limit` (or use the helper `zflows.utils.set_cache_size_limit(N)`) so Dynamo doesn't evict your specializations.
+The pattern that *doesn't* work is `torch.compile(my_loss)` and then passing the flow / potentials as runtime arguments — each call would build a fresh `flow.t()`, Dynamo would re-guard on its object identity, and the cache would either thrash or hit `BACKEND_MATCH` failures. `loss_compile` sidesteps both by stuffing the Python-heavy arguments into the closure. If you mix multiple distinct loss-function shapes in the same script, raise `torch._dynamo.config.cache_size_limit` (or use the helper `zflows.utils.set_cache_size_limit(N)`) so Dynamo doesn't evict your specializations.
 
-If your loss takes keyword-only arguments or needs more elaborate dispatch, write a thin wrapper that closes over them and pass the wrapper into `compile_raw`. This is the kind of small mechanical refactor that AI coding assistants (e.g. [Claude Code](https://claude.com/claude-code), which built this project) handle well.
+If your loss takes keyword-only arguments or needs more elaborate dispatch, write a thin wrapper that closes over them and pass the wrapper into `loss_compile`. This is the kind of small mechanical refactor that AI coding assistants (e.g. [Claude Code](https://claude.com/claude-code), which built this project) handle well.
 
 </details>
 
@@ -539,7 +539,7 @@ If you need conditional flows, use [zuko](https://github.com/probabilists/zuko) 
 
 Neither is a drop-in replacement for the energy-based sampling / Boltzmann-generator pipeline `zflows` is built around — both target the SBI / density-estimation use cases — so expect to assemble the *propose → reweight → resample → rejuvenate* loop yourself out of their primitives.
 
-On raw speed: with `torch.compile` in the training loop (via `compile_raw` / `compile_beta` / `Potential.enable_grad` / `Potential.enable_eval`), the per-step gap between JAX and PyTorch is typically minor. What PyTorch still gives you for free is a natural OOP layout centered on `nn.Module` — `Flow`, `Potential`, and their subclasses all inherit from it, so `.to(device)`, `.parameters()`, `.state_dict()`, and `optimizer.step()` work without extra plumbing. JAX has no equivalent default and routes parameters explicitly. Random number generation is similar: PyTorch's global `torch.manual_seed(...)` is sufficient for the Langevin / MALA / HMC routines in `zflows.utils`, while JAX requires you to thread a `PRNGKey` through every sampler call.
+On raw speed: with `torch.compile` in the training loop (via `loss_compile` / `loss_compile_beta` / `Potential.enable_grad` / `Potential.enable_eval`), the per-step gap between JAX and PyTorch is typically minor. What PyTorch still gives you for free is a natural OOP layout centered on `nn.Module` — `Flow`, `Potential`, and their subclasses all inherit from it, so `.to(device)`, `.parameters()`, `.state_dict()`, and `optimizer.step()` work without extra plumbing. JAX has no equivalent default and routes parameters explicitly. Random number generation is similar: PyTorch's global `torch.manual_seed(...)` is sufficient for the Langevin / MALA / HMC routines in `zflows.utils`, while JAX requires you to thread a `PRNGKey` through every sampler call.
 
 </details>
 

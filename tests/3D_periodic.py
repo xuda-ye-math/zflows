@@ -15,7 +15,7 @@ from zflows.utils import (
 
 # Silence Triton autotune / Inductor / Dynamo / Python warnings, and give
 # Dynamo enough cache headroom for the few compiled functions this script
-# creates (one loss.compile_raw + enable_grad + enable_eval).
+# creates (one loss.loss_compile + enable_grad + enable_eval).
 suppress_warnings()
 set_cache_size_limit(16)
 
@@ -63,10 +63,10 @@ optimizer = torch.optim.Adam(flow.parameters(), lr=LR)
 # Compile the reverse-KL training step once. F = flow.t() is captured here
 # but the lazy machinery re-reads flow's nn.Parameters by attribute access
 # on every forward, so optimizer.step() updates flow correctly. We use
-# compile_raw (single-input fast path) because beta stays at its default
-# 1.0 throughout training; for an annealing schedule, swap to compile_beta.
+# loss_compile (single-input fast path) because beta stays at its default
+# 1.0 throughout training; for an annealing schedule, swap to loss_compile_beta.
 F = flow.t()
-loss_fn = zflows.loss.compile_raw(reverse_KL, u1, F)
+loss_fn = zflows.loss.loss_compile(reverse_KL, u1, F)
 
 for epoch in range(EPOCH):
     perm = torch.randperm(N, device=device)

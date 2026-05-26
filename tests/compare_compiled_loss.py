@@ -1,6 +1,6 @@
 # pyright: reportOperatorIssue=false, reportArgumentType=false, reportCallIssue=false
 
-"""Benchmark `zflows.loss.compile_raw` against the raw `reverse_KL(x, target, flow.t())`
+"""Benchmark `zflows.loss.loss_compile` against the raw `reverse_KL(x, target, flow.t())`
 pattern across an NSF (d × hidden_features) grid.
 
 What is measured:
@@ -9,8 +9,8 @@ What is measured:
         optimizer.zero_grad(); loss.backward(); optimizer.step()
     in three modes:
         raw                   — fresh flow.t() per call, no compile
-        compiled-default      — zflows.loss.compile_raw(..., mode='default')
-        compiled-reduce-overhead — zflows.loss.compile_raw(..., mode='reduce-overhead')
+        compiled-default      — zflows.loss.loss_compile(..., mode='default')
+        compiled-reduce-overhead — zflows.loss.loss_compile(..., mode='reduce-overhead')
 
 torch.compile wraps only the forward; backward + Adam.step run in eager
 regardless of mode. The reported numbers therefore include compile-eligible
@@ -79,7 +79,7 @@ def build_loss_fn(
 ) -> Callable[[torch.Tensor], torch.Tensor]:
     """Return a callable (x_batch) -> scalar loss for the requested mode.
 
-    The compiled modes use `zflows.loss.compile_raw` — the single-input
+    The compiled modes use `zflows.loss.loss_compile` — the single-input
     fast path with no wrapper / cast overhead — since the benchmark
     measures a fixed-beta workload.
     """
@@ -88,9 +88,9 @@ def build_loss_fn(
             return reverse_KL(x, target=potential, F=flow.t())
         return raw_loss
     if mode == "default":
-        return zloss.compile_raw(reverse_KL, potential, flow.t(), mode="default")
+        return zloss.loss_compile(reverse_KL, potential, flow.t(), mode="default")
     if mode == "reduce-overhead":
-        return zloss.compile_raw(reverse_KL, potential, flow.t(), mode="reduce-overhead")
+        return zloss.loss_compile(reverse_KL, potential, flow.t(), mode="reduce-overhead")
     raise ValueError(f"unknown mode {mode!r}")
 
 
@@ -133,8 +133,8 @@ def sanity_check_compiled_matches_raw(
             hidden_features=hf).to(x.device)
     with torch.no_grad():
         l_raw = reverse_KL(x, target=potential, F=f.t()).item()
-        l_def = zloss.compile_raw(reverse_KL, potential, f.t(), mode="default")(x).item()
-        l_red = zloss.compile_raw(reverse_KL, potential, f.t(), mode="reduce-overhead")(x).item()
+        l_def = zloss.loss_compile(reverse_KL, potential, f.t(), mode="default")(x).item()
+        l_red = zloss.loss_compile(reverse_KL, potential, f.t(), mode="reduce-overhead")(x).item()
     if abs(l_def - l_raw) > atol or abs(l_red - l_raw) > atol:
         sys.exit(
             f"FAIL — compile-induced numerical drift at (d={d}, hf={hf}): "

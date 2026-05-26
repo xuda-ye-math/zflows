@@ -21,9 +21,9 @@ _zeros, _CNF_interface) into one banner-separated harness. Sections:
   11. CNF dual interface:   cnf.t()  ≡  cnf._ffj()
       (forward, inverse, round-trip, gradients all agree).
   12. Backprop reaches every parameter (RealNVP + CNF).
-  13. zflows.loss.compile_raw / compile_beta sanity:
-      (a) compile_raw output matches raw reverse_KL (default beta + baked beta);
-      (b) compile_beta with runtime beta does not trigger recompiles.
+  13. zflows.loss.loss_compile / loss_compile_beta sanity:
+      (a) loss_compile output matches raw reverse_KL (default beta + baked beta);
+      (b) loss_compile_beta with runtime beta does not trigger recompiles.
 """
 
 import sys
@@ -439,7 +439,7 @@ for name, flow, x_factory in [
 print("  [OK ] every parameter receives gradients")
 
 # ─────────────────────────────────────────────────────────────────
-banner("13. zflows.loss.compile_raw / compile_beta sanity")
+banner("13. zflows.loss.loss_compile / loss_compile_beta sanity")
 set_cache_size_limit(64) # headroom so any unintended recompile surfaces in the counter rather than getting silently throttled
 
 torch.manual_seed(0)
@@ -448,43 +448,43 @@ F_lc = nsf_lc.t()
 u_lc = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0], device=device)
 x_lc = torch.randn(64, 2, device=device)
 
-# --- 13a. compile_raw: single-input fast path -------------------------
+# --- 13a. loss_compile: single-input fast path -------------------------
 # The returned closure has signature `(x) -> scalar`; beta is either left
 # at its default 1.0 or baked into the captured constants.
 print()
-print("  13a. compile_raw  — single-input fast path, no runtime beta")
+print("  13a. loss_compile  — single-input fast path, no runtime beta")
 
 # Default beta=1.0 path (beta absorbed into reverse_KL's default kwarg)
-raw_default = zflows.loss.compile_raw(reverse_KL, u_lc, F_lc)
+raw_default = zflows.loss.loss_compile(reverse_KL, u_lc, F_lc)
 l_compiled_default = raw_default(x_lc).item()
 l_raw_default = reverse_KL(x_lc, u_lc, F_lc).item()
 print(f"  default beta=1.0:   compiled={l_compiled_default:.6f}, raw={l_raw_default:.6f}, "
       f"diff={abs(l_compiled_default - l_raw_default):.3e}")
 if abs(l_compiled_default - l_raw_default) > 1e-3:
-    print(f"  FAIL: compile_raw default-beta output drift")
+    print(f"  FAIL: loss_compile default-beta output drift")
     sys.exit(1)
 
 # Baked-in beta path: pass beta as a captured constant.
 for fixed_beta in (0.3, 0.7, 2.5):
-    raw_fixed = zflows.loss.compile_raw(reverse_KL, u_lc, F_lc, fixed_beta)
+    raw_fixed = zflows.loss.loss_compile(reverse_KL, u_lc, F_lc, fixed_beta)
     l_c = raw_fixed(x_lc).item()
     l_r = reverse_KL(x_lc, u_lc, F_lc, beta=fixed_beta).item()
     print(f"  baked  beta={fixed_beta}:  compiled={l_c:.6f}, raw={l_r:.6f}, "
           f"diff={abs(l_c - l_r):.3e}")
     if abs(l_c - l_r) > 1e-3:
-        print(f"  FAIL: compile_raw baked-beta={fixed_beta} output drift")
+        print(f"  FAIL: loss_compile baked-beta={fixed_beta} output drift")
         sys.exit(1)
-print("  [OK ] compile_raw matches raw reverse_KL for default and baked-in beta")
+print("  [OK ] loss_compile matches raw reverse_KL for default and baked-in beta")
 
-# --- 13b. compile_beta: runtime beta does NOT trigger recompiles ------
+# --- 13b. loss_compile_beta: runtime beta does NOT trigger recompiles ------
 # The returned closure casts a Python `float` beta to a 0-d tensor before
 # entering the compiled graph, so Dynamo treats beta as a dynamic input
 # and a single artifact handles every value of beta. Sweeping a dozen
 # distinct betas must NOT add any new graph traces.
 print()
-print("  13b. compile_beta — runtime beta, single artifact across schedule")
+print("  13b. loss_compile_beta — runtime beta, single artifact across schedule")
 
-loss_fn = zflows.loss.compile_beta(reverse_KL, u_lc, F_lc)
+loss_fn = zflows.loss.loss_compile_beta(reverse_KL, u_lc, F_lc)
 
 # Warmup: pay the one-time compile cost on a representative beta.
 _ = loss_fn(x_lc, 0.1).item()
@@ -509,40 +509,40 @@ for b, l_c in zip(betas, losses):
         sys.exit(1)
 print(f"  [OK ] one compiled graph reused across {len(betas)} betas; outputs match raw reverse_KL")
 
-# --- 13c. OTFlow under compile_raw / compile_beta ---------------------
+# --- 13c. OTFlow under loss_compile / loss_compile_beta ---------------------
 # OTFlow's closed-form trace runs inside an RK4-unrolled ODE. This checks
 # the whole transform captures + compiles cleanly (no graph break on the
 # Hessian-trace, no per-beta recompile, gradients still flow).
 print()
-print("  13c. compile_raw / compile_beta on OTFlow (closed-form trace in RK4 ODE)")
+print("  13c. loss_compile / loss_compile_beta on OTFlow (closed-form trace in RK4 ODE)")
 
 torch.manual_seed(0)
 otf_lc = OTFlow(dimension=2, hidden=32, layer=3, nt=6).to(device)
 F_ot = otf_lc.t()
 
 # 13c-i: compiled reverse_KL matches eager.
-raw_ot = zflows.loss.compile_raw(reverse_KL, u_lc, F_ot)
+raw_ot = zflows.loss.loss_compile(reverse_KL, u_lc, F_ot)
 l_c = raw_ot(x_lc).item()
 l_r = reverse_KL(x_lc, u_lc, F_ot).item()
-print(f"  compile_raw:  compiled={l_c:.6f}, eager={l_r:.6f}, diff={abs(l_c - l_r):.3e}")
+print(f"  loss_compile:  compiled={l_c:.6f}, eager={l_r:.6f}, diff={abs(l_c - l_r):.3e}")
 if abs(l_c - l_r) > 1e-3:
-    print("  FAIL: OTFlow compile_raw output drift")
+    print("  FAIL: OTFlow loss_compile output drift")
     sys.exit(1)
 
-# 13c-ii: compile_beta sweep adds no new graphs (the recompile bug).
-loss_ot = zflows.loss.compile_beta(reverse_KL, u_lc, F_ot)
+# 13c-ii: loss_compile_beta sweep adds no new graphs (the recompile bug).
+loss_ot = zflows.loss.loss_compile_beta(reverse_KL, u_lc, F_ot)
 _ = loss_ot(x_lc, 0.1).item()  # warmup compile
 c0 = dynamo.utils.counters["stats"]["unique_graphs"]
 betas_ot = [0.2, 0.5, 1.0, 2.0, 3.0]
 losses_ot = [loss_ot(x_lc, b).item() for b in betas_ot]
 delta = dynamo.utils.counters["stats"]["unique_graphs"] - c0
-print(f"  compile_beta: unique_graphs delta across {len(betas_ot)} betas: {delta}  (expect 0)")
+print(f"  loss_compile_beta: unique_graphs delta across {len(betas_ot)} betas: {delta}  (expect 0)")
 if delta != 0:
-    print(f"  FAIL: OTFlow compile_beta recompiled {delta} time(s)")
+    print(f"  FAIL: OTFlow loss_compile_beta recompiled {delta} time(s)")
     sys.exit(1)
 for b, l_cb in zip(betas_ot, losses_ot):
     if abs(l_cb - reverse_KL(x_lc, u_lc, F_ot, beta=b).item()) > 1e-3:
-        print(f"  FAIL: OTFlow compile_beta drift at beta={b}")
+        print(f"  FAIL: OTFlow loss_compile_beta drift at beta={b}")
         sys.exit(1)
 
 # 13c-iii: backprop through the compiled loss reaches every Phi parameter.
@@ -612,7 +612,7 @@ for kind in ("rotation", "lu"):
 
     # 14f — captured F stays consistent under parameter mutation.
     # This is the central capture-once contract relied on by
-    # zflows.loss.compile_raw / compile_beta. Mixing layers must reread
+    # zflows.loss.loss_compile / loss_compile_beta. Mixing layers must reread
     # their weight on every forward; eager-cached R / L / U regress here.
     torch.manual_seed(99)
     flow_cap = RealNVP(dimension=4, transforms=4, mixing=kind, hidden_features=(32, 32)).to(device)

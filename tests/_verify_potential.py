@@ -24,18 +24,25 @@ harness. Sections:
         - default vs beta=1.0 is byte-identical;
         - empirical variance contracts as 1/beta (tempered N(mean, var/beta)).
 
-   D. Potential._from(fn) / Potential._instance_from(fn):
-        - _from returns a Potential subclass; instance forwards to fn;
+   D. potential_from(fn) / potential_instance_from(fn):
+        - potential_from returns a Potential subclass; instance forwards to fn;
         - enable_grad() + enable_eval() chain through;
         - .grad(x) matches autograd of fn(x).sum() w.r.t. x;
-        - _instance_from returns a ready-to-use instance equivalent to _from(fn)().
+        - potential_instance_from returns a ready-to-use instance
+          equivalent to potential_from(fn)().
 """
 
 from pathlib import Path
 
 import torch
 
-from zflows.potential import Gaussian, Linear_Combination, Potential
+from zflows.potential import (
+    Gaussian,
+    Linear_Combination,
+    Potential,
+    potential_from,
+    potential_instance_from,
+)
 from zflows.utils import langevin, set_cache_size_limit, suppress_warnings
 
 # Silence Triton/Inductor/Dynamo/Python warnings; cache headroom for the
@@ -285,26 +292,26 @@ print("  [OK ] tempered variance contracts as 1/beta")
 
 
 # ══════════════════════════════════════════════════════════════════
-# D. Potential._from(fn) — wrap a callable as a Potential
+# D. potential_from(fn) — wrap a callable as a Potential
 # ══════════════════════════════════════════════════════════════════
-banner("D. Potential._from(fn) wraps a stateless callable")
+banner("D. potential_from(fn) wraps a stateless callable")
 
 def _U_from(x: torch.Tensor) -> torch.Tensor:
     # U(x) = 0.5 ||x||^2 + 2 * cos(x_1)
     x1 = x[:, 0]
     return 0.5 * (x ** 2).sum(-1) + 2 * torch.cos(x1)
 
-# D.1 — _from returns a Potential subclass; instances forward to fn
-section("D.1  _from(fn) returns a subclass; instance(x) ≡ fn(x)")
-U_from = Potential._from(_U_from)
+# D.1 — potential_from returns a Potential subclass; instances forward to fn
+section("D.1  potential_from(fn) returns a subclass; instance(x) ≡ fn(x)")
+U_from = potential_from(_U_from)
 assert isinstance(U_from, type) and issubclass(U_from, Potential), \
-    "_from must return a Potential subclass (not an instance)"
+    "potential_from must return a Potential subclass (not an instance)"
 u_fn = U_from().to(device)
 x_fn = torch.randn(64, 3, device=device)
 y_potential = u_fn(x_fn)
 y_direct    = _U_from(x_fn)
 diff = (y_potential - y_direct).abs().max().item()
-print(f"  max |Potential._from(fn)()(x) - fn(x)| = {diff:.3e}")
+print(f"  max |potential_from(fn)()(x) - fn(x)| = {diff:.3e}")
 assert diff == 0.0, f"forward drift: {diff}"
 print("  [OK ] subclass instance forwards to the underlying callable")
 
@@ -329,19 +336,20 @@ print(f"  max |u.grad(x) - autograd(fn)| = {err_grad:.3e}")
 assert err_grad < 1e-4, f"grad drift: {err_grad}"
 print("  [OK ] compiled grad / eval fast paths match autograd / fn(x)")
 
-# D.3 — _instance_from returns a ready-to-use instance equivalent to _from(fn)()
-section("D.3  _instance_from(fn) returns an instance equivalent to _from(fn)()")
-u_inst = Potential._instance_from(_U_from).to(device)
+# D.3 — potential_instance_from returns a ready-to-use instance equivalent
+#       to potential_from(fn)()
+section("D.3  potential_instance_from(fn) returns an instance equivalent to potential_from(fn)()")
+u_inst = potential_instance_from(_U_from).to(device)
 assert isinstance(u_inst, Potential) and not isinstance(u_inst, type), \
-    "_instance_from must return a Potential instance (not a class)"
+    "potential_instance_from must return a Potential instance (not a class)"
 y_inst = u_inst(x_fn)
 diff_inst = (y_inst - y_direct).abs().max().item()
-print(f"  max |Potential._instance_from(fn)(x) - fn(x)| = {diff_inst:.3e}")
-assert diff_inst == 0.0, f"_instance_from forward drift: {diff_inst}"
-# Same class as _from(fn) (both build a fresh _FunctionPotential subclass)
+print(f"  max |potential_instance_from(fn)(x) - fn(x)| = {diff_inst:.3e}")
+assert diff_inst == 0.0, f"potential_instance_from forward drift: {diff_inst}"
+# Same class as potential_from(fn) (both build a fresh _FunctionPotential subclass)
 assert isinstance(u_inst, Potential)
 assert type(u_inst).__name__ == "_FunctionPotential"
-print("  [OK ] _instance_from yields a Potential instance with matching forward")
+print("  [OK ] potential_instance_from yields a Potential instance with matching forward")
 
 
 # ─────────────────────────────────────────────────────────────────

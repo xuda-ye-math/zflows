@@ -117,10 +117,10 @@ def OT_loss(x: torch.Tensor, target: Potential, otflow: OTFlow, beta: float = 1.
 
 
 # ──────────────────────────────────────────────────────────────────────
-# compile_raw / compile_beta — torch.compile a loss with captured args
+# loss_compile / loss_compile_beta — torch.compile a loss with captured args
 # ──────────────────────────────────────────────────────────────────────
 
-def compile_raw(
+def loss_compile(
     loss_fn: Callable[..., torch.Tensor],
     *captured,
     mode: str = 'default',
@@ -129,12 +129,12 @@ def compile_raw(
     tensor; everything else is captured as a Python closure constant.
 
     The four KL losses in `zflows.loss` all match this shape, so the
-    canonical call is `compile_raw(reverse_KL, potential, transform)`
+    canonical call is `loss_compile(reverse_KL, potential, transform)`
     and the returned closure has signature `(x_batch) -> scalar`. If you
     want a non-default `beta` baked in, pass it as a captured constant:
-    `compile_raw(reverse_KL, potential, transform, 0.7)` makes `beta=0.7`
+    `loss_compile(reverse_KL, potential, transform, 0.7)` makes `beta=0.7`
     a closure constant. For adaptive `beta` across steps without
-    recompiling, see `compile_beta` instead.
+    recompiling, see `loss_compile_beta` instead.
 
     Why capture the heavy arguments as closure constants:
         - `torch.compile`'s Dynamo guards each cached specialization by
@@ -181,7 +181,7 @@ def compile_raw(
 
     Example:
         F = flow.t()
-        loss = zflows.loss.compile_raw(reverse_KL, u1, F)
+        loss = zflows.loss.loss_compile(reverse_KL, u1, F)
         for x_batch in batches:
             l = loss(x_batch)
             optimizer.zero_grad(); l.backward(); optimizer.step()
@@ -192,7 +192,7 @@ def compile_raw(
     return compiled
 
 
-def compile_beta(
+def loss_compile_beta(
     loss_fn: Callable[..., torch.Tensor],
     *captured,
     mode: str = 'default',
@@ -204,9 +204,9 @@ def compile_beta(
 
     The four KL losses in `zflows.loss` all have signature
     `(x, potential, transform, beta) -> scalar`, so the canonical call
-    is `compile_beta(reverse_KL, potential, transform)` and the returned
+    is `loss_compile_beta(reverse_KL, potential, transform)` and the returned
     closure has signature `(x_batch, beta=1.0) -> scalar`. For a fixed
-    `beta` baked into the graph, prefer `compile_raw` — it skips the
+    `beta` baked into the graph, prefer `loss_compile` — it skips the
     wrapper / cast overhead entirely.
 
     Why beta is a runtime argument:
@@ -223,7 +223,7 @@ def compile_beta(
           `beta_t = torch.tensor(0.5, device=device)` for tightest loops.
 
     All the captured-once / Dynamo-cache-stability arguments from
-    `compile_raw` carry over verbatim.
+    `loss_compile` carry over verbatim.
 
     Arguments:
         loss_fn:   any callable with signature
@@ -243,7 +243,7 @@ def compile_beta(
         guarantee. Build a per-sample loss helper if you need that.
 
     Example (annealing schedule, no recompile):
-        loss = zflows.loss.compile_beta(reverse_KL, u1, F)
+        loss = zflows.loss.loss_compile_beta(reverse_KL, u1, F)
         for step, x_batch in enumerate(batches):
             beta = min(1.0, step / 1000)
             l = loss(x_batch, beta)
@@ -259,7 +259,7 @@ def compile_beta(
             beta = torch.as_tensor(beta, dtype=x.dtype, device=x.device)
         # Higher-rank beta would trigger per-shape recompiles.
         assert beta.dim() == 0, (
-            f"compile_beta(): beta must be a scalar (Python float/int or "
+            f"loss_compile_beta(): beta must be a scalar (Python float/int or "
             f"0-d Tensor); got shape {tuple(beta.shape)}."
         )
         return compiled(x, beta)

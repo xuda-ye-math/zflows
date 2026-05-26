@@ -99,10 +99,10 @@ else:
     F = flow.t()
 
     # Annealed reverse-KL loss: U_curr(y) = (1 - c) * U_source(y) + c * U_target(y).
-    # c is baked into the captured closure of compile_raw (one fresh
-    # compile per rung); we deliberately avoid compile_beta here because
+    # c is baked into the captured closure of loss_compile (one fresh
+    # compile per rung); we deliberately avoid loss_compile_beta here because
     # bridge interpolation between two different potentials is a
-    # different operation than the high->low-temp tempering compile_beta
+    # different operation than the high->low-temp tempering loss_compile_beta
     # is designed for.
     def reverse_KL_annealed(x: torch.Tensor, src: Potential, tgt: Potential, F, c: float) -> torch.Tensor:
         y, ladj = F.call_and_ladj(x)
@@ -128,7 +128,7 @@ else:
         # so baking c_k into the annealed loss above gives the right
         # gradient directly. One fresh compile per rung; cache headroom
         # is set above.
-        loss_fn = zflows.loss.compile_raw(reverse_KL_annealed, u_source, u_target, F, c_k)
+        loss_fn = zflows.loss.loss_compile(reverse_KL_annealed, u_source, u_target, F, c_k)
         for epoch in range(EPOCH):
             perm = torch.randperm(N_TRAIN, device=device)
             epoch_loss, n_batches = 0.0, 0

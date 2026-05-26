@@ -46,53 +46,6 @@ class Potential(nn.Module):
         """
         raise NotImplementedError
 
-    @classmethod
-    def _from(cls, fn) -> type["Potential"]:
-        """Wrap a stateless callable `(x: Tensor) -> Tensor` as a Potential
-        *subclass* — like writing the subclass by hand, just shorter.
-
-        Returns the class itself (not an instance), so callers instantiate
-        explicitly with `U()` just as they would for `Gaussian(...)` etc.
-        Instances support the full toolchain (`.to(device)`,
-        `.enable_grad()`, `.enable_eval()`, `.parameters()`) — there just
-        won't be any learnable parameters because `fn` is a plain function.
-
-        (Method name is `_from`, not `from`, because `from` is a Python
-        keyword and can't be a method name.)
-
-        Example:
-            def U_fn(x: torch.Tensor) -> torch.Tensor:
-                # x: [N, D] -> U(x): [N]   (batched for efficiency)
-                return 0.5 * (x ** 2).sum(-1) + 2 * torch.cos(x[:, 0])
-
-            U = Potential._from(U_fn)  # class
-            u = U().to(device)         # instance
-
-        For potentials that carry state (physical constants, learnable
-        sub-modules, …), subclass `Potential` directly instead.
-        """
-        class _FunctionPotential(cls):
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                return fn(x)
-        return _FunctionPotential
-    
-    @classmethod
-    def _instance_from(cls, fn) -> "Potential":
-        """One-liner variant of `_from` that returns a ready-to-use instance.
-
-        Equivalent to `cls._from(fn)()` — skip if you need to keep the
-        class around (e.g. to instantiate per-device copies); use this
-        when you only ever want a single instance of the wrapped callable.
-
-        Example:
-            def U_fn(x: torch.Tensor) -> torch.Tensor:
-                # x: [N, D] -> U(x): [N]   (batched for efficiency)
-                return 0.5 * (x ** 2).sum(-1) + 2 * torch.cos(x[:, 0])
-
-            u = Potential._instance_from(U_fn).to(device)   # instance, chainable
-        """
-        return cls._from(fn)()
-
     def enable_grad(self, mode: str = "reduce-overhead") -> "Potential":
         """
         Compile a fast .grad(x) using torch.func.grad + torch.compile, vmapped
@@ -217,6 +170,147 @@ class Potential(nn.Module):
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Functional wrappers — turn a plain callable into a Potential subclass
+# ──────────────────────────────────────────────────────────────────────
+
+def potential_from(fn) -> type[Potential]:
+    """Wrap a stateless callable `(x: Tensor) -> Tensor` as a Potential
+    *subclass* — like writing the subclass by hand, just shorter.
+
+    Returns the class itself (not an instance), so callers instantiate
+    explicitly with `U()` just as they would for `Gaussian(...)` etc.
+    Instances support the full toolchain (`.to(device)`,
+    `.enable_grad()`, `.enable_eval()`, `.parameters()`) — there just
+    won't be any learnable parameters because `fn` is a plain function.
+
+    Example:
+        def U_fn(x: torch.Tensor) -> torch.Tensor:
+            # x: [N, D] -> U(x): [N]   (batched for efficiency)
+            return 0.5 * (x ** 2).sum(-1) + 2 * torch.cos(x[:, 0])
+
+        U = potential_from(U_fn)   # class
+        u = U().to(device)         # instance
+
+    For potentials that carry state (physical constants, learnable
+    sub-modules, …), subclass `Potential` directly instead.
+    """
+    class _FunctionPotential(Potential):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return fn(x)
+    return _FunctionPotential
+
+
+def potential_instance_from(fn) -> Potential:
+    """One-liner variant of `potential_from` that returns a ready-to-use
+    instance.
+
+    Equivalent to `potential_from(fn)()` — skip if you need to keep the
+    class around (e.g. to instantiate per-device copies); use this when
+    you only ever want a single instance of the wrapped callable.
+
+    Example:
+        def U_fn(x: torch.Tensor) -> torch.Tensor:
+            return 0.5 * (x ** 2).sum(-1) + 2 * torch.cos(x[:, 0])
+
+        u = potential_instance_from(U_fn).to(device)   # instance, chainable
+    """
+    return potential_from(fn)()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Compositional — Linear_Combination of potentials (annealing bridges)
+# ──────────────────────────────────────────────────────────────────────
+
+class Linear_Combination(Potential):
+    """
+    Linear combination of N potentials:
+        U(x) = sum_k c_k * U_k(x).
+    Useful for Boltzmann interpolations U_t = (1 - t) * U_0 + t * U_1 (the
+    common N = 2 case), but generalizes naturally to multi-rung bridges
+    and convex mixtures of an arbitrary number of building-block energies.
+
+    The child potentials are stored as an `nn.ModuleList`, so
+    `.to(device)`, `.parameters()`, and `.state_dict()` recurse through
+    them. Coefficients are stored on `self.coeffs` in one of two forms:
+
+      - **Python list of floats** (the simplest case). Mutate
+        `self.coeffs[k] = new_value` between iterations to retune one
+        term. Immune to `.to(device)` — `float * Tensor` lifts to the
+        tensor's device automatically.
+      - **`torch.Tensor` of shape `[N]`**. Registered as an `nn.Module`
+        buffer so `.to(device)` / `.cuda()` / `.float()` move it along
+        with the potentials — that's the redundancy that keeps a stray
+        `.to('cuda')` from leaving the coeffs on CPU and tripping a
+        device-mismatch error on the next forward. Mutate in place via
+        `self.coeffs[k] = new_value` or `self.coeffs.fill_(...)` —
+        modern PyTorch refuses any reassignment `self.coeffs = ...`
+        with a clear `TypeError`, so the buffer registration is safe.
+
+    A device-resident tensor also avoids the Dynamo Python-float
+    specialization that would otherwise re-trace the compiled graph on
+    every coefficient change — handy for annealed schedules sharing a
+    single compiled forward.
+
+    If you prefer plain Python callables over `Potential` objects, you can
+    skip this class entirely: define `lambda x: sum(c_k * U_k(x) for ...)`
+    yourself and wrap it via `potential_from(fn)` (class) or
+    `potential_instance_from(fn)` (instance).
+    """
+    def __init__(
+        self,
+        potentials: list["Potential"] | tuple["Potential", ...],
+        coeffs: list[float] | tuple[float, ...] | torch.Tensor,
+    ):
+        """
+        Input:
+            potentials: list/tuple of N Potential instances (N >= 1)
+            coeffs:     list/tuple of N floats, or a 1-d Tensor of shape
+                        [N], holding the matching coefficients.
+
+        Both inputs must be non-empty and have the same length.
+        """
+        super().__init__()
+        assert len(potentials) == len(coeffs), \
+            f"potentials ({len(potentials)}) and coeffs ({len(coeffs)}) must have the same length"
+        assert len(potentials) >= 1, "Linear_Combination needs at least one term"
+        self.potentials = nn.ModuleList(potentials)
+        if isinstance(coeffs, torch.Tensor):
+            assert coeffs.ndim == 1, \
+                f"Tensor coeffs must be 1-d, got shape {tuple(coeffs.shape)}"
+            # Coeffs are mixture / interpolation weights, not learnable
+            # parameters. Registering a requires_grad=True tensor as a
+            # buffer would silently hide it from `optimizer.parameters()`
+            # while still accumulating `.grad` — a confusing footgun.
+            # Reject it explicitly; users who want a trainable mixture
+            # should subclass Linear_Combination and register a real
+            # nn.Parameter themselves.
+            assert not coeffs.requires_grad, (
+                "Linear_Combination coeffs are stored as a buffer and must not "
+                "require gradients; pass `coeffs.detach()` or build the tensor "
+                "without `requires_grad=True`."
+            )
+            # Register as a buffer so .to(device) / .cuda() / .float() etc.
+            # move the coeffs in lock-step with the potentials' parameters
+            # and buffers. Without this, a tensor stored as a plain attribute
+            # would stay on its original device while the potentials move.
+            self.register_buffer("coeffs", coeffs)
+        else:
+            self.coeffs = list(coeffs)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Input:
+            x: Tensor [N, d]
+        Output:
+            U(x): Tensor [N]
+        """
+        out = self.coeffs[0] * self.potentials[0](x)
+        for c, U in zip(self.coeffs[1:], self.potentials[1:]):
+            out = out + c * U(x)
+        return out
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -385,96 +479,3 @@ class Gaussian_Mixture(Potential):
         idx = torch.multinomial(self.log_weights.exp(), N, replacement=True) # [N]
         z = torch.randn(N, self.d, device=self.device)
         return self.mean[idx] + self.variance[idx].sqrt() * z
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Compositional — Linear_Combination of potentials (annealing bridges)
-# ──────────────────────────────────────────────────────────────────────
-
-class Linear_Combination(Potential):
-    """
-    Linear combination of N potentials:
-        U(x) = sum_k c_k * U_k(x).
-    Useful for Boltzmann interpolations U_t = (1 - t) * U_0 + t * U_1 (the
-    common N = 2 case), but generalizes naturally to multi-rung bridges
-    and convex mixtures of an arbitrary number of building-block energies.
-
-    The child potentials are stored as an `nn.ModuleList`, so
-    `.to(device)`, `.parameters()`, and `.state_dict()` recurse through
-    them. Coefficients are stored on `self.coeffs` in one of two forms:
-
-      - **Python list of floats** (the simplest case). Mutate
-        `self.coeffs[k] = new_value` between iterations to retune one
-        term. Immune to `.to(device)` — `float * Tensor` lifts to the
-        tensor's device automatically.
-      - **`torch.Tensor` of shape `[N]`**. Registered as an `nn.Module`
-        buffer so `.to(device)` / `.cuda()` / `.float()` move it along
-        with the potentials — that's the redundancy that keeps a stray
-        `.to('cuda')` from leaving the coeffs on CPU and tripping a
-        device-mismatch error on the next forward. Mutate in place via
-        `self.coeffs[k] = new_value` or `self.coeffs.fill_(...)` —
-        modern PyTorch refuses any reassignment `self.coeffs = ...`
-        with a clear `TypeError`, so the buffer registration is safe.
-
-    A device-resident tensor also avoids the Dynamo Python-float
-    specialization that would otherwise re-trace the compiled graph on
-    every coefficient change — handy for annealed schedules sharing a
-    single compiled forward.
-
-    If you prefer plain Python callables over `Potential` objects, you can
-    skip this class entirely: define `lambda x: sum(c_k * U_k(x) for ...)`
-    yourself and wrap it via `Potential._from(fn)` (class) or
-    `Potential._instance_from(fn)` (instance).
-    """
-    def __init__(
-        self,
-        potentials: list["Potential"] | tuple["Potential", ...],
-        coeffs: list[float] | tuple[float, ...] | torch.Tensor,
-    ):
-        """
-        Input:
-            potentials: list/tuple of N Potential instances (N >= 1)
-            coeffs:     list/tuple of N floats, or a 1-d Tensor of shape
-                        [N], holding the matching coefficients.
-
-        Both inputs must be non-empty and have the same length.
-        """
-        super().__init__()
-        assert len(potentials) == len(coeffs), \
-            f"potentials ({len(potentials)}) and coeffs ({len(coeffs)}) must have the same length"
-        assert len(potentials) >= 1, "Linear_Combination needs at least one term"
-        self.potentials = nn.ModuleList(potentials)
-        if isinstance(coeffs, torch.Tensor):
-            assert coeffs.ndim == 1, \
-                f"Tensor coeffs must be 1-d, got shape {tuple(coeffs.shape)}"
-            # Coeffs are mixture / interpolation weights, not learnable
-            # parameters. Registering a requires_grad=True tensor as a
-            # buffer would silently hide it from `optimizer.parameters()`
-            # while still accumulating `.grad` — a confusing footgun.
-            # Reject it explicitly; users who want a trainable mixture
-            # should subclass Linear_Combination and register a real
-            # nn.Parameter themselves.
-            assert not coeffs.requires_grad, (
-                "Linear_Combination coeffs are stored as a buffer and must not "
-                "require gradients; pass `coeffs.detach()` or build the tensor "
-                "without `requires_grad=True`."
-            )
-            # Register as a buffer so .to(device) / .cuda() / .float() etc.
-            # move the coeffs in lock-step with the potentials' parameters
-            # and buffers. Without this, a tensor stored as a plain attribute
-            # would stay on its original device while the potentials move.
-            self.register_buffer("coeffs", coeffs)
-        else:
-            self.coeffs = list(coeffs)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Input:
-            x: Tensor [N, d]
-        Output:
-            U(x): Tensor [N]
-        """
-        out = self.coeffs[0] * self.potentials[0](x)
-        for c, U in zip(self.coeffs[1:], self.potentials[1:]):
-            out = out + c * U(x)
-        return out

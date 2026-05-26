@@ -1,6 +1,6 @@
-# Benchmark: `zflows.loss.compile_raw` vs. raw `reverse_KL`
+# Benchmark: `zflows.loss.loss_compile` vs. raw `reverse_KL`
 
-This is the only **performance** test in `tests/` (every other script verifies *correctness* or trains a flow on a concrete target). It measures how much faster a real training step gets when the loss is wrapped with `zflows.loss.compile_raw(...)` instead of called the obvious way as `reverse_KL(x, target, flow.t())`. The numbers are produced on the *full* training step
+This is the only **performance** test in `tests/` (every other script verifies *correctness* or trains a flow on a concrete target). It measures how much faster a real training step gets when the loss is wrapped with `zflows.loss.loss_compile(...)` instead of called the obvious way as `reverse_KL(x, target, flow.t())`. The numbers are produced on the *full* training step
 
 ```python
 loss = loss_fn(x_batch)
@@ -21,23 +21,23 @@ for x_batch in batches:
 
 This works, but at small `d` the per-step time is dominated by Python overhead (constructing a fresh `ComposedTransform` on every `flow.t()` call, walking the lazy `AutoregressiveTransform` list, kernel-launch latency between dozens of tiny CUDA ops). Wrapping the loss with `torch.compile` collapses that entire stack into one fused graph — but doing it the obvious way (`torch.compile(reverse_KL)`) doesn't work, because the `F` argument is a fresh `ComposedTransform` object on every call and Dynamo can't reuse its cache across invocations.
 
-`zflows.loss.compile_raw(loss_fn, potential, transform, mode='default')` is the fix: it captures `potential` and `transform` as closure constants so they're invisible to Dynamo's guard system, returning a `(x_batch) -> scalar` callable whose only argument is the per-step batch. This benchmark exists to answer the question: *how much do you get for that one-line change?*
+`zflows.loss.loss_compile(loss_fn, potential, transform, mode='default')` is the fix: it captures `potential` and `transform` as closure constants so they're invisible to Dynamo's guard system, returning a `(x_batch) -> scalar` callable whose only argument is the per-step batch. This benchmark exists to answer the question: *how much do you get for that one-line change?*
 
 ## The core mechanism
 
 The captured-once trick is in [`zflows/loss.py`](../zflows/loss.py) and amounts to:
 
 ```python
-def compile_raw(loss_fn, *captured, mode='default'):
+def loss_compile(loss_fn, *captured, mode='default'):
     @torch.compile(mode=mode)
     def compiled(x):
         return loss_fn(x, *captured)
     return compiled
 ```
 
-The four KL losses in `zflows.loss` have signature `(x, potential, transform, beta=1.0) -> scalar`, so the canonical call is `compile_raw(reverse_KL, potential, transform)` with `captured = (potential, transform)`. `beta` is then absorbed into the loss's default kwarg (`beta=1.0`), or it can be baked in explicitly by passing it as another captured constant: `compile_raw(reverse_KL, potential, transform, 0.7)` produces a closure with `beta=0.7` fixed in the graph. The variadic form makes the same helper work for any custom loss whose first argument is the per-batch tensor and the rest are Python constants.
+The four KL losses in `zflows.loss` have signature `(x, potential, transform, beta=1.0) -> scalar`, so the canonical call is `loss_compile(reverse_KL, potential, transform)` with `captured = (potential, transform)`. `beta` is then absorbed into the loss's default kwarg (`beta=1.0`), or it can be baked in explicitly by passing it as another captured constant: `loss_compile(reverse_KL, potential, transform, 0.7)` produces a closure with `beta=0.7` fixed in the graph. The variadic form makes the same helper work for any custom loss whose first argument is the per-batch tensor and the rest are Python constants.
 
-A sibling helper `zflows.loss.compile_beta` keeps `beta` as a *runtime* argument of the returned closure (cast to a 0-d tensor at the boundary so Dynamo treats it as a dynamic input and a single graph handles every value) for adaptive / annealed schedules. The benchmark uses `compile_raw` because it measures a fixed-`beta` workload — `compile_raw` skips the wrapper / `isinstance` / `as_tensor` cast and shaves the last few microseconds per step.
+A sibling helper `zflows.loss.loss_compile_beta` keeps `beta` as a *runtime* argument of the returned closure (cast to a 0-d tensor at the boundary so Dynamo treats it as a dynamic input and a single graph handles every value) for adaptive / annealed schedules. The benchmark uses `loss_compile` because it measures a fixed-`beta` workload — `loss_compile` skips the wrapper / `isinstance` / `as_tensor` cast and shaves the last few microseconds per step.
 
 Two things make this both **correct** and **fast**:
 
@@ -63,7 +63,7 @@ The grid is fixed at the top of [`compare_compiled_loss.py`](compare_compiled_lo
 
 </div>
 
-For each of the 15 `(d, hf)` cells, three modes are timed back-to-back: `raw`, `compiled-default`, and `compiled-reduce-overhead`. Each cell starts from a fresh `NSF` + `Adam` + (for compiled modes) a fresh `loss_fn` returned by `zflows.loss.compile_raw(...)`, then `del`'d and `torch.cuda.empty_cache()`d before the next cell to keep memory clean.
+For each of the 15 `(d, hf)` cells, three modes are timed back-to-back: `raw`, `compiled-default`, and `compiled-reduce-overhead`. Each cell starts from a fresh `NSF` + `Adam` + (for compiled modes) a fresh `loss_fn` returned by `zflows.loss.loss_compile(...)`, then `del`'d and `torch.cuda.empty_cache()`d before the next cell to keep memory clean.
 
 Two infrastructure helpers from [`zflows.utils`](../zflows/utils.py) make the benchmark loop tractable:
 
@@ -84,7 +84,7 @@ Pointers into the script:
 
 - imports + `suppress_warnings()` / `set_cache_size_limit(64)`: [`compare_compiled_loss.py:30–47`](compare_compiled_loss.py#L30-L47)
 - grid configuration: [`compare_compiled_loss.py:57–69`](compare_compiled_loss.py#L57-L69)
-- `build_loss_fn` (raw, compiled-default, compiled-reduce-overhead via `compile_raw` — the single-input fast path, no wrapper overhead): [`compare_compiled_loss.py:75–95`](compare_compiled_loss.py#L75-L95)
+- `build_loss_fn` (raw, compiled-default, compiled-reduce-overhead via `loss_compile` — the single-input fast path, no wrapper overhead): [`compare_compiled_loss.py:75–95`](compare_compiled_loss.py#L75-L95)
 - `time_full_step` (warmup + `cuda.synchronize` + `time.perf_counter`): [`compare_compiled_loss.py:97–121`](compare_compiled_loss.py#L97-L121)
 - per-cell correctness sanity check: [`compare_compiled_loss.py:123–145`](compare_compiled_loss.py#L123-L145)
 - main benchmark loop + incremental CSV write: [`compare_compiled_loss.py:151–223`](compare_compiled_loss.py#L151-L223)
@@ -125,7 +125,7 @@ Three regularities to notice:
 
 - **The gap narrows as the network grows.** At $d=32, hf=(256, 256)$ — the largest cell — `reduce-overhead` is "only" ~7.2× faster than raw. Two effects compound: (i) GPU compute starts to be a real fraction of step time, leaving less Python overhead to amortize; (ii) the eager `loss.backward()` + `optimizer.step()` portion is unchanged across modes, so as the forward becomes a smaller fraction of the step, the compile contribution shrinks.
 
-**Takeaway for users.** On *any* current `zflows`-style workload (NSF / NCSF, $d$ up to a few dozen, normal-size MLPs), wrapping the training loss with `zflows.loss.compile_raw(...)` (or `compile_beta` for adaptive-temperature schedules) gives a real **4–10× per-step speedup** that compounds across the thousands of steps a Boltzmann-generator training run needs. The 3D / 4D test scripts already use this pattern; see [`3D_periodic.md`](3D_periodic.md) and [`4D_Boltzmann_generator.md`](4D_Boltzmann_generator.md).
+**Takeaway for users.** On *any* current `zflows`-style workload (NSF / NCSF, $d$ up to a few dozen, normal-size MLPs), wrapping the training loss with `zflows.loss.loss_compile(...)` (or `loss_compile_beta` for adaptive-temperature schedules) gives a real **4–10× per-step speedup** that compounds across the thousands of steps a Boltzmann-generator training run needs. The 3D / 4D test scripts already use this pattern; see [`3D_periodic.md`](3D_periodic.md) and [`4D_Boltzmann_generator.md`](4D_Boltzmann_generator.md).
 
 ## Caveats
 

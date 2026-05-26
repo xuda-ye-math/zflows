@@ -672,7 +672,7 @@ class RotationTransform(Transform):
     typically `optimizer.step()` — are picked up on the next forward
     without the caller having to rebuild the transform. This mirrors
     the lazy-read behaviour of `AutoregressiveTransform.meta` and is
-    what makes the `compile_raw` capture-once contract work for
+    what makes the `loss_compile` capture-once contract work for
     `LinearMixingTransform`.
 
     Arguments:

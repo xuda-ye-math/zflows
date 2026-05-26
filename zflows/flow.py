@@ -347,7 +347,7 @@ class OTFlow(Flow):
     torch.compile-friendly).
 
     The forward map and `log|det J|` follow the standard `(y, ladj)` contract,
-    so an `OTFlow` is a drop-in `Flow` for `reverse_KL` / `compile_raw` and the
+    so an `OTFlow` is a drop-in `Flow` for `reverse_KL` / `loss_compile` and the
     SMC utilities. The two extra optimal-transport diagnostics — the transport
     cost `∫½|∇Φ|² dt` and the HJB residual `∫|½|∇Φ|² - ∂_tΦ| dt` — are exposed
     through `zflows.loss.OT_loss`, which integrates all four channels in one
