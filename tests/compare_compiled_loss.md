@@ -53,7 +53,7 @@ The grid is fixed at the top of [`compare_compiled_loss.py`](compare_compiled_lo
 |----------------|----------------------------------------------------------------------|
 | flow           | `NSF` with `bins=12, transforms=4, randmask=True`                    |
 | target         | `Gaussian(0, I_d)` on $\mathbb R^d$ (so backward is non-trivial)     |
-| sweep          | $d \in \{2, 4, 8, 16, 32\}$ × $\texttt{hidden\_features} \in \{(64,64), (128,128), (256,256)\}$ |
+| sweep          | `dimension` ∈ {2, 4, 8, 16, 32} × `hidden_features` ∈ {(64,64), (128,128), (256,256)} |
 | batch size     | 2000                                                                 |
 | timed steps    | 100, after 30 warmup steps to absorb compile + early-iteration retracing |
 

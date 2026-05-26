@@ -56,12 +56,12 @@ The gradient closure is built once, cached on the instance, and reused every cal
 **One-line compilable KL losses.** `reverse_KL(x, target, F)` and `forward_KL(y, source, F)` are direct-call functions returning a scalar loss. For heavy-load training (e.g. annealed Boltzmann generators with thousands of steps per bridge) wrap the loss once with `zflows.loss.compile(...)` to capture `(potential, transform)` as closure constants and fuse the forward into a CUDA graph — typically **4–10× faster per training step** ([benchmark](tests/compare_compiled_loss.md)):
 
 ```python
+import zflows
 from zflows.loss import reverse_KL
-import zflows.loss
 
-F = flow.t()                                  # captured once; lazy machinery
-                                              # picks up optimizer.step() updates
-loss_fn = zflows.loss.compile(reverse_KL, u1, F, mode='reduce-overhead')
+F = flow.t()
+
+loss_fn = zflows.loss.compile(reverse_KL, target, F, mode='reduce-overhead')
 
 for x_batch in batches:
     loss = loss_fn(x_batch)
@@ -211,7 +211,7 @@ python -m tests.2D_forward_KL
 <details open>
 <summary><strong>3. Compiled vs. raw loss benchmark</strong></summary>
 
-[`tests/compare_compiled_loss.py`](tests/compare_compiled_loss.py) (writeup: [`tests/compare_compiled_loss.md`](tests/compare_compiled_loss.md)) sweeps `NSF` across a $d \times \texttt{hidden\_features}$ grid and times the *full* training step (forward + `backward()` + `Adam.step()`) in three modes: raw `reverse_KL(x, target, flow.t())`, `zflows.loss.compile(...)` with `mode='default'`, and with `mode='reduce-overhead'` (CUDA Graphs). The captured-once trick — pass `F = flow.t()` as a closure constant so Dynamo sees a stable object identity across iterations — turns what looks like a Python-overhead-bound workload at small $d$ into a fused CUDA-graph replay.
+[`tests/compare_compiled_loss.py`](tests/compare_compiled_loss.py) (writeup: [`tests/compare_compiled_loss.md`](tests/compare_compiled_loss.md)) sweeps `NSF` across a `dimension × hidden_features` grid and times the *full* training step (forward + `backward()` + `Adam.step()`) in three modes: raw `reverse_KL(x, target, flow.t())`, `zflows.loss.compile(...)` with `mode='default'`, and with `mode='reduce-overhead'` (CUDA Graphs). The captured-once trick — pass `F = flow.t()` as a closure constant so Dynamo sees a stable object identity across iterations — turns what looks like a Python-overhead-bound workload at small `dimension` into a fused CUDA-graph replay.
 
 ```bash
 python -m tests.compare_compiled_loss
@@ -219,25 +219,25 @@ python -m tests.compare_compiled_loss
 
 Result on an RTX 5070 Ti (committed [`tests/compare_compiled_loss.csv`](tests/compare_compiled_loss.csv)), mean ms per training step over 100 timed steps:
 
-| $d$ | `hidden_features` | raw ms | default ms | reduce ms | speedup default | speedup reduce |
-|----:|:------------------|------:|----------:|---------:|--------------:|--------------:|
-|   2 | (64, 64)          |  6.05 |      1.24 |     0.46 |          4.86 |         13.25 |
-|   2 | (128, 128)        |  5.99 |      1.24 |     0.46 |          4.85 |         13.03 |
-|   2 | (256, 256)        |  6.00 |      1.26 |     0.61 |          4.78 |          9.88 |
-|   4 | (64, 64)          |  6.00 |      1.34 |     0.47 |          4.48 |         12.92 |
-|   4 | (128, 128)        |  6.00 |      1.25 |     0.49 |          4.80 |         12.36 |
-|   4 | (256, 256)        |  6.02 |      1.38 |     0.73 |          4.36 |          8.25 |
-|   8 | (64, 64)          |  5.96 |      1.39 |     0.54 |          4.28 |         10.96 |
-|   8 | (128, 128)        |  5.38 |      1.40 |     0.58 |          3.85 |          9.31 |
-|   8 | (256, 256)        |  5.55 |      1.39 |     0.85 |          4.00 |          6.52 |
-|  16 | (64, 64)          |  6.83 |      1.39 |     0.65 |          4.91 |         10.50 |
-|  16 | (128, 128)        |  6.94 |      1.44 |     0.80 |          4.83 |          8.71 |
-|  16 | (256, 256)        |  7.24 |      1.33 |     1.10 |          5.44 |          6.60 |
-|  32 | (64, 64)          | 12.24 |      1.26 |     1.05 |          9.74 |         11.67 |
-|  32 | (128, 128)        | 12.33 |      1.28 |     1.21 |          9.65 |         10.16 |
-|  32 | (256, 256)        | 12.81 |      1.70 |     1.67 |          7.56 |          7.65 |
+| dimension | hidden_features | raw ms | default ms | reduce ms | speedup default | speedup reduce |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+|  2 | (64, 64)   |  6.05 | 1.24 | 0.46 |  4.86 | 13.25 |
+|  2 | (128, 128) |  5.99 | 1.24 | 0.46 |  4.85 | 13.03 |
+|  2 | (256, 256) |  6.00 | 1.26 | 0.61 |  4.78 |  9.88 |
+|  4 | (64, 64)   |  6.00 | 1.34 | 0.47 |  4.48 | 12.92 |
+|  4 | (128, 128) |  6.00 | 1.25 | 0.49 |  4.80 | 12.36 |
+|  4 | (256, 256) |  6.02 | 1.38 | 0.73 |  4.36 |  8.25 |
+|  8 | (64, 64)   |  5.96 | 1.39 | 0.54 |  4.28 | 10.96 |
+|  8 | (128, 128) |  5.38 | 1.40 | 0.58 |  3.85 |  9.31 |
+|  8 | (256, 256) |  5.55 | 1.39 | 0.85 |  4.00 |  6.52 |
+| 16 | (64, 64)   |  6.83 | 1.39 | 0.65 |  4.91 | 10.50 |
+| 16 | (128, 128) |  6.94 | 1.44 | 0.80 |  4.83 |  8.71 |
+| 16 | (256, 256) |  7.24 | 1.33 | 1.10 |  5.44 |  6.60 |
+| 32 | (64, 64)   | 12.24 | 1.26 | 1.05 |  9.74 | 11.67 |
+| 32 | (128, 128) | 12.33 | 1.28 | 1.21 |  9.65 | 10.16 |
+| 32 | (256, 256) | 12.81 | 1.70 | 1.67 |  7.56 |  7.65 |
 
-The raw baseline is flat at ~5–6 ms for $d \leq 16$ regardless of `hidden_features` — diagnostic of Python-overhead-bound code, not GPU-bound compute. `reduce-overhead` consistently delivers 6.5–13× per-step speedup; `default` mode (no CUDA Graphs) delivers 4–10×. The speedup persists at the largest cell ($d=32$, $hf=(256, 256)$) at ~7.6×, well past the point where the bottleneck shifts from Python to compute. See the [writeup](tests/compare_compiled_loss.md) for the methodology (warmup, sanity check, cache-size limits) and three observations on how the gap scales.
+The raw baseline starts rising at $d \ge 16$ — by $d = 32$ it has roughly doubled to ~12 ms regardless of `hidden_features`, which is where GPU compute begins to dominate over Python launch overhead. `reduce-overhead` consistently delivers 6.5–13× per-step speedup; `default` mode (no CUDA Graphs) delivers 4–10×. The speedup persists at the largest cell ($d = 32$, `hidden_features = (256, 256)`) at ~7.6×, well past the point where the bottleneck shifts from Python to compute. See the [writeup](tests/compare_compiled_loss.md) for the methodology (warmup, sanity check, cache-size limits) and three observations on how the gap scales.
 
 </details>
 
