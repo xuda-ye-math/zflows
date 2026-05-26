@@ -1,4 +1,4 @@
-<p align="center"><img src="logo.png" alt="zflows logo" width="240px"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/xuda-ye-math/zflows/main/logo.png" alt="zflows logo" width="240px"></p>
 <p align="center"><sub><em>designed by ChatGPT</em></sub></p>
 
 # zflows
@@ -152,6 +152,14 @@ zflows
 
 `zflows` is pure Python; the only runtime dependency is [`torch`](https://pytorch.org), resolved automatically by `pip` (`numpy` is pulled in transitively).
 
+The latest tagged release is on PyPI:
+
+```bash
+pip install zflows
+```
+
+…or clone the repo for an editable install if you want the latest unreleased features (and the tests / demo scripts on disk):
+
 **1. Clone the repository.**
 
 ```bash
@@ -300,7 +308,7 @@ Several end-to-end scripts are provided. Run from the project root:
 python -m tests.2D_reverse_KL
 ```
 
-<p align="center"><img src="tests/2D_reverse_KL.png" alt="reverse KL test" width="600px"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/xuda-ye-math/zflows/main/tests/2D_reverse_KL.png" alt="reverse KL test" width="600px"></p>
 
 </details>
 
@@ -313,7 +321,7 @@ python -m tests.2D_reverse_KL
 python -m tests.2D_forward_KL
 ```
 
-<p align="center"><img src="tests/2D_forward_KL.png" alt="forward KL test" width="600px"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/xuda-ye-math/zflows/main/tests/2D_forward_KL.png" alt="forward KL test" width="600px"></p>
 
 </details>
 
@@ -363,7 +371,7 @@ The raw baseline starts rising at $d \ge 16$ — by $d = 32$ it has roughly doub
 python -m tests.3D_periodic
 ```
 
-<p align="center"><img src="tests/3D_periodic.png" alt="3D periodic test" width="400px"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/xuda-ye-math/zflows/main/tests/3D_periodic.png" alt="3D periodic test" width="400px"></p>
 
 </details>
 
@@ -376,7 +384,7 @@ python -m tests.3D_periodic
 python -m tests.4D_Boltzmann_generator
 ```
 
-<p align="center"><img src="tests/4D_Boltzmann_generator.png" alt="4D Boltzmann generator" width="1000px"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/xuda-ye-math/zflows/main/tests/4D_Boltzmann_generator.png" alt="4D Boltzmann generator" width="1000px"></p>
 
 </details>
 
@@ -389,7 +397,7 @@ python -m tests.4D_Boltzmann_generator
 python -m tests.2D_two_moon_CNF
 ```
 
-<p align="center"><img src="tests/2D_two_moon_CNF.png" alt="2D two-moons CNF test" width="700px"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/xuda-ye-math/zflows/main/tests/2D_two_moon_CNF.png" alt="2D two-moons CNF test" width="700px"></p>
 
 </details>
 
@@ -402,7 +410,7 @@ python -m tests.2D_two_moon_CNF
 python -m tests.2D_RealNVP_latent_interpolation
 ```
 
-<p align="center"><img src="tests/2D_RealNVP_latent_interpolation.png" alt="2D RealNVP latent interpolation" width="700px"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/xuda-ye-math/zflows/main/tests/2D_RealNVP_latent_interpolation.png" alt="2D RealNVP latent interpolation" width="700px"></p>
 
 </details>
 
