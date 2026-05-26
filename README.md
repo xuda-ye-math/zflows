@@ -87,17 +87,12 @@ The first few steps pay a one-time Triton / Inductor compile cost; every step af
 ```python
 from zflows.utils import importance_weights, resample, langevin, hmc, compute_ESS, compute_CESS
 
-importance_weights(samples, source, target, F, beta_source=1.0, beta_target=1.0, chunk=1)
-                                                          # log w = -beta_target * target(F(x))
-                                                          #         + beta_source * source(x) + log|det J_F|
-resample(samples, weights)                                # multinomial resampling with replacement
-langevin(samples, potential, beta=1.0, step=1e-3, iters=100, adjust=False, chunk=1)
-                                                          # alias: rejuvenation; adjust=True -> MALA
-                                                          # stationary distribution: exp(-beta * potential)
-hmc(samples, potential, beta=1.0, step=1e-2, iters=10, burns=10, chunk=1)
-                                                          # Hamiltonian Monte Carlo; stationary: exp(-beta * potential)
-compute_ESS(weights)                                      # importance-sampling diagnostic
-compute_CESS(source_weights, importance_weights)          # conditional ESS diagnostic
+importance_weights(samples, source, target, F, beta_source=1.0, beta_target=1.0, chunk=1)  # IS log-weights between tempered rungs
+resample(samples, weights)                                                                 # multinomial resampling with replacement
+langevin(samples, potential, beta=1.0, step=1e-3, iters=100, adjust=False, chunk=1)        # ULA; adjust=True -> MALA; alias: rejuvenation
+hmc(samples, potential, beta=1.0, step=1e-2, iters=10, burns=10, chunk=1)                  # Hamiltonian Monte Carlo
+compute_ESS(weights)                                                                       # importance-sampling diagnostic
+compute_CESS(source_weights, importance_weights)                                           # conditional ESS diagnostic
 ```
 
 `beta` controls the tempering for the samplers and lets `importance_weights` reweight between two tempered ladder rungs (e.g. anneal `beta_target` from 0 to 1 while holding `beta_source = 1`). `chunk` splits the batch along dim 0 to bound peak VRAM (statistically equivalent to `chunk=1`).
