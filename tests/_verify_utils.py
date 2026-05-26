@@ -7,13 +7,16 @@ Run from the repo root:  python -m tests._verify_utils
 Consolidates the earlier per-routine sanity scripts (_taming, _hmc, _lbfgs)
 into one banner-separated harness. Sections:
 
-   A. Tamed Langevin stability on the cubic-gradient quartic potential.
+   A. Tamed Langevin stability on the cubic-gradient quartic potential
+      (+ A.4 inverse-temperature beta tests).
    B. HMC sanity: invariance, convergence, anisotropic mixing, NaN guard,
       enable_grad gating, chunk-equivalence, enable_eval fallback,
-      super-linear (quartic) potential.
+      super-linear (quartic) potential (+ B.9 inverse-temperature beta).
    C. L-BFGS sanity: well-conditioned and ill-conditioned convergence,
       chunk-determinism, enable_grad gating, Armijo line search,
       `optimization` alias.
+   D. Importance-weight reweighting: default vs (beta_source, beta_target)
+      = (1, 1) byte-equality, linearity in each beta.
 """
 
 import math
@@ -21,8 +24,10 @@ import math
 import torch
 
 from zflows.potential import Gaussian, Potential
+from zflows.flow import NSF
 from zflows.utils import (
     hmc, langevin, lbfgs, optimization,
+    importance_weights, importance_weights_log,
     set_cache_size_limit, suppress_warnings,
 )
 
@@ -114,6 +119,41 @@ except ValueError as e:
     print(f"  raised: {e}")
 assert raised, "langevin must reject adjust=True with taming>0"
 print("  [OK ] rejected as expected")
+
+# A.4 — inverse-temperature beta: defaults are bit-compatible, and beta
+# scales the stationary distribution correctly (Gaussian: var -> var/beta).
+section("A.4  beta=1.0 reproduces default; beta>1 tightens the cloud")
+u_beta = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device).enable_grad().enable_eval()
+
+# (4a) beta defaulted vs beta=1.0 explicit: byte-identical for both ULA and MALA
+torch.manual_seed(0)
+x0 = torch.randn(256, 2, device=device)
+torch.manual_seed(123)
+y_def_ula = langevin(x0.clone(), potential=u_beta, step=1e-3, iters=50)
+torch.manual_seed(123)
+y_b1_ula  = langevin(x0.clone(), potential=u_beta, beta=1.0, step=1e-3, iters=50)
+print(f"  ULA  default vs beta=1.0: equal={torch.equal(y_def_ula, y_b1_ula)}")
+assert torch.equal(y_def_ula, y_b1_ula)
+
+torch.manual_seed(123)
+y_def_mala = langevin(x0.clone(), potential=u_beta, step=1e-3, iters=50, adjust=True)
+torch.manual_seed(123)
+y_b1_mala  = langevin(x0.clone(), potential=u_beta, beta=1.0, step=1e-3, iters=50, adjust=True)
+print(f"  MALA default vs beta=1.0: equal={torch.equal(y_def_mala, y_b1_mala)}")
+assert torch.equal(y_def_mala, y_b1_mala)
+
+# (4b) MALA at beta=1 and beta=4 against N(0,I): variance should scale as 1/beta.
+torch.manual_seed(4)
+x0 = u_beta.samples(8000)
+y_b1 = langevin(x0.clone(), potential=u_beta, beta=1.0, step=0.05, iters=300, adjust=True)
+y_b4 = langevin(x0.clone(), potential=u_beta, beta=4.0, step=0.05, iters=300, adjust=True)
+var1 = y_b1.var(dim=0).mean().item() # target ~1.0
+var4 = y_b4.var(dim=0).mean().item() # target ~0.25
+print(f"  MALA stationary var:  beta=1.0 -> {var1:.4f} (expect ~1.00)")
+print(f"                        beta=4.0 -> {var4:.4f} (expect ~0.25)")
+assert abs(var1 - 1.0)  < 0.06, f"beta=1 cloud variance off: {var1}"
+assert abs(var4 - 0.25) < 0.04, f"beta=4 cloud variance off: {var4}"
+print("  [OK ] beta=1.0 bit-compatible; beta=4.0 contracts variance 4x")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -266,6 +306,35 @@ assert n_at_start > 0.99, f"too many divergent trajectories accepted: {n_at_star
 print("  [OK ] super-linear chain sampled + tail rejected")
 
 
+# B.9 — inverse-temperature beta: bit-compatible default + tempered variance
+section("B.9  beta=1.0 reproduces default; beta>1 tightens the cloud")
+u_b = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device).enable_grad().enable_eval()
+
+# (9a) defaulted vs beta=1.0 explicit: byte-identical for the same seed.
+torch.manual_seed(9)
+x0 = u_b.samples(2000)
+torch.manual_seed(90)
+y_def = hmc(x0.clone(), potential=u_b, step=0.15, iters=10, burns=10)
+torch.manual_seed(90)
+y_b1  = hmc(x0.clone(), potential=u_b, beta=1.0, step=0.15, iters=10, burns=10)
+print(f"  HMC default vs beta=1.0: equal={torch.equal(y_def, y_b1)}")
+assert torch.equal(y_def, y_b1)
+
+# (9b) on N(0, I), the stationary at inverse temperature beta is N(0, I/beta):
+# per-axis variance should be 1/beta.
+torch.manual_seed(91)
+x0 = u_b.samples(8000)
+y_b1 = hmc(x0.clone(), potential=u_b, beta=1.0, step=0.15, iters=10, burns=30)
+y_b4 = hmc(x0.clone(), potential=u_b, beta=4.0, step=0.08, iters=10, burns=30)
+var1 = y_b1.var(dim=0).mean().item() # target ~1.0
+var4 = y_b4.var(dim=0).mean().item() # target ~0.25
+print(f"  HMC stationary var:  beta=1.0 -> {var1:.4f} (expect ~1.00)")
+print(f"                       beta=4.0 -> {var4:.4f} (expect ~0.25)")
+assert abs(var1 - 1.0)  < 0.05, f"beta=1 cloud variance off: {var1}"
+assert abs(var4 - 0.25) < 0.03, f"beta=4 cloud variance off: {var4}"
+print("  [OK ] beta=1.0 bit-compatible; beta=4.0 contracts variance 4x")
+
+
 # ══════════════════════════════════════════════════════════════════
 # C. L-BFGS sanity
 # ══════════════════════════════════════════════════════════════════
@@ -368,6 +437,59 @@ section("C.6  optimization is an alias of lbfgs")
 print(f"  optimization is lbfgs: {optimization is lbfgs}")
 assert optimization is lbfgs, "optimization should be the lbfgs symbol itself, not a wrapper"
 print("  [OK ] alias confirmed")
+
+
+# ══════════════════════════════════════════════════════════════════
+# D. Importance-weight reweighting
+# ══════════════════════════════════════════════════════════════════
+banner("D. importance_weights / _log: defaults + beta linearity")
+
+torch.manual_seed(0)
+d = 3
+flow_iw = NSF(a=[-5.0]*d, b=[5.0]*d).to(device)
+F = flow_iw.t()
+src = Gaussian(mean=[0.0]*d, variance=[1.0]*d, device=device)
+tgt = Gaussian(mean=[0.5]*d, variance=[0.7]*d, device=device)
+x_iw = torch.randn(2000, d, device=device)
+
+# D.1 — defaults == (1.0, 1.0) byte-for-byte
+section("D.1  default vs beta_source=beta_target=1.0 is byte-identical")
+lw_def = importance_weights_log(x_iw, src, tgt, F)
+lw_b11 = importance_weights_log(x_iw, src, tgt, F, beta_source=1.0, beta_target=1.0)
+print(f"  log:     equal = {torch.equal(lw_def, lw_b11)}")
+assert torch.equal(lw_def, lw_b11)
+
+w_def = importance_weights(x_iw, src, tgt, F)
+w_b11 = importance_weights(x_iw, src, tgt, F, beta_source=1.0, beta_target=1.0)
+print(f"  linear:  equal = {torch.equal(w_def, w_b11)}")
+assert torch.equal(w_def, w_b11)
+print("  [OK ] defaults match explicit (1.0, 1.0)")
+
+# D.2 — log-weight is linear in each beta, with the right coefficient
+section("D.2  linearity:  d(log w)/d(beta_t) = -target(y),  d(log w)/d(beta_s) = +source(x)")
+y_iw, _ = F.call_and_ladj(x_iw)
+diff_bt = (importance_weights_log(x_iw, src, tgt, F, beta_target=2.0)
+           - importance_weights_log(x_iw, src, tgt, F, beta_target=1.0))
+diff_bs = (importance_weights_log(x_iw, src, tgt, F, beta_source=2.0)
+           - importance_weights_log(x_iw, src, tgt, F, beta_source=1.0))
+err_bt = (diff_bt + tgt(y_iw)).abs().max().item()
+err_bs = (diff_bs - src(x_iw)).abs().max().item()
+print(f"  beta_target 1->2:  max |diff + target(y)| = {err_bt:.3e}")
+print(f"  beta_source 1->2:  max |diff - source(x)| = {err_bs:.3e}")
+assert err_bt < 1e-4, f"beta_target slope wrong: {err_bt}"
+assert err_bs < 1e-4, f"beta_source slope wrong: {err_bs}"
+print("  [OK ] log-weights linear in each beta with correct sign")
+
+# D.3 — linear wrapper forwards betas to the log-version
+section("D.3  importance_weights forwards betas to importance_weights_log")
+log_w = importance_weights_log(x_iw, src, tgt, F, beta_source=1.5, beta_target=0.4)
+w_expected = (log_w - log_w.max()).exp()
+w_actual   = importance_weights(x_iw, src, tgt, F, beta_source=1.5, beta_target=0.4)
+err_fwd = (w_actual - w_expected).abs().max().item()
+print(f"  max |w_actual - w_expected| = {err_fwd:.3e}")
+assert err_fwd < 1e-6, f"linear wrapper drops the betas: {err_fwd}"
+print("  [OK ] kwargs reach the log-space implementation")
+
 
 # ─────────────────────────────────────────────────────────────────
 print()

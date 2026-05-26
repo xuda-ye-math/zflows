@@ -6,18 +6,18 @@ import torch
 from zflows.potential import Potential, Gaussian, Linear_Combination
 from zflows.flow import NSF
 import zflows.loss
-from zflows.loss import reverse_KL
 from zflows.utils import (
     compute_ESS_log, resample, rejuvenation, importance_weights_log,
     set_cache_size_limit, suppress_warnings,
 )
 
-# Silence Triton autotune / Inductor / Dynamo / Python warnings, and give
-# Dynamo enough cache headroom: the annealing loop creates one fresh
-# loss.compile() per bridge (M = 12 in this script), plus enable_grad +
-# enable_eval each step, plus a few internal compiles in MALA / Adam.
+# Silence Triton autotune / Inductor / Dynamo / Python warnings. The
+# training loss is compiled exactly once (the bridge coefficient c is a
+# runtime arg, not a captured constant), so Dynamo's per-loss cache
+# never fills; enable_grad / enable_eval on U_curr each step do produce
+# a fresh artifact per rung, so we still give a little headroom.
 suppress_warnings()
-set_cache_size_limit(32)
+set_cache_size_limit(16)
 
 HERE = Path(__file__).resolve().parent
 
@@ -100,6 +100,20 @@ else:
     # per batch.
     F = flow.t()
 
+    # Annealed reverse-KL loss: U_curr(y) = (1 - c) * U_source(y) + c * U_target(y).
+    # The bridge coefficient c is the runtime "beta" slot (last positional
+    # arg), so a single compiled artifact covers every rung — no recompile
+    # per anneal step.
+    def reverse_KL_annealed(x: torch.Tensor, src: Potential, tgt: Potential, F, c) -> torch.Tensor:
+        y, ladj = F.call_and_ladj(x)
+        return ((1.0 - c) * src(y) + c * tgt(y) - ladj).mean()
+
+    loss_fn = zflows.loss.compile(reverse_KL_annealed, u_source, u_target, F)
+    # Pre-allocate the bridge-coefficient buffer (the runtime arg of loss_fn);
+    # .fill_(c_k) once per rung avoids a per-step torch.as_tensor() allocation
+    # inside the inner training loop.
+    c_t = torch.tensor(0.0, device=device)
+
     # annealed Boltzmann generator: for each k = 1, ..., M, train the flow
     # using the previous and current bridges
     #     U_{k-1} = (1 - c_{k-1}) * U_source + c_{k-1} * U_target
@@ -107,7 +121,9 @@ else:
     for k in range(1, M + 1):
         U_prev = Linear_Combination(u_target, u_source, c_list[k - 1].item())
         U_curr = Linear_Combination(u_target, u_source, c_list[k    ].item())
-        print(f"=== step {k}/{M}   c_{k-1} = {c_list[k-1].item():.3f}  ->  c_{k} = {c_list[k].item():.3f} ===")
+        c_k = c_list[k].item()
+        c_t.fill_(c_k)
+        print(f"=== step {k}/{M}   c_{k-1} = {c_list[k-1].item():.3f}  ->  c_{k} = {c_k:.3f} ===")
 
         # (1) resample N_TRAIN training samples from x_valid_prev (~ mu_{k-1})
         idx = torch.randint(0, N_VALID, (N_TRAIN,), device=device)
@@ -115,17 +131,14 @@ else:
 
         # (2) train the flow: reverse KL from x_train_prev (~mu_{k-1}) to U_curr (mu_k).
         # The U_{k-1}(x) term in the reverse-KL objective is parameter-independent,
-        # so reverse_KL(x, target=U_curr, flow) gives the right loss directly.
-        # Compile the loss for THIS bridge: U_curr changes per step, so one
-        # spec accumulates per anneal rung (M = 12 specs total, well under
-        # the cache_size_limit of 32 set at the top).
-        loss_fn = zflows.loss.compile(reverse_KL, U_curr, F)
+        # so plugging c_k into the annealed loss above gives the right
+        # gradient directly. loss_fn was compiled ONCE outside this loop.
         for epoch in range(EPOCH):
             perm = torch.randperm(N_TRAIN, device=device)
             epoch_loss, n_batches = 0.0, 0
             for start in range(0, N_TRAIN, BATCH):
                 x_batch = x_train_prev[perm[start:start + BATCH]]
-                loss = loss_fn(x_batch)
+                loss = loss_fn(x_batch, c_t)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()

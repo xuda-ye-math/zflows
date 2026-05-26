@@ -83,12 +83,15 @@ def compute_CESS_log(source_weights: torch.Tensor, log_importance_weights: torch
 # Importance weights — log/linear-space SMC reweighting
 # ──────────────────────────────────────────────────────────────────────
 
-def importance_weights(samples: torch.Tensor, source: Potential, target: Potential, F: ComposedTransform, chunk: int = 1) -> torch.Tensor:
+def importance_weights(samples: torch.Tensor, source: Potential, target: Potential, F: ComposedTransform, beta_source: float = 1.0, beta_target: float = 1.0, chunk: int = 1) -> torch.Tensor:
     """
     Linear-space self-normalized importance weights for the proposal
-    `nu = F_# source` against the target `mu_1 ~ exp(-target)`. Thin
-    convenience wrapper around `importance_weights_log`: subtract the
-    max log-weight for numerical stability, then exponentiate.
+    `nu = F_# mu_0` against the target `mu_1`, where the two ends are
+    the tempered Gibbs distributions
+        mu_0(x) ~ exp(-beta_source * source(x)),
+        mu_1(y) ~ exp(-beta_target * target(y)).
+    Thin convenience wrapper around `importance_weights_log`: subtract
+    the max log-weight for numerical stability, then exponentiate.
 
         w_i = exp(log_w_i - max_j log_w_j),   w in [0, 1].
 
@@ -102,53 +105,75 @@ def importance_weights(samples: torch.Tensor, source: Potential, target: Potenti
     tail diagnostics).
 
     Input:
-        samples: Tensor [N, d]      particles drawn from `source`
-        source:  Potential          source (proposal-base) potential U_0
-        target:  Potential          target potential U_1
-        F:       ComposedTransform  forward flow map (typically obtained as flow.t())
-        chunk:   int                split `samples` along dim 0 into this many
-                                    chunks and accumulate. Reduces peak GPU
-                                    memory at the cost of wall time;
-                                    statistically and numerically equivalent
-                                    to chunk=1 (the per-sample log-weight
-                                    only depends on its own (x, F(x))).
+        samples:     Tensor [N, d]      particles drawn from `source`
+        source:      Potential          source (proposal-base) potential U_0
+        target:      Potential          target potential U_1
+        F:           ComposedTransform  forward flow map (typically obtained as flow.t())
+        beta_source: float              inverse temperature of the source
+                                        distribution (default 1.0).
+        beta_target: float              inverse temperature of the target
+                                        distribution (default 1.0). Pair this
+                                        with the same beta that was passed to
+                                        the loss / Langevin / HMC so the
+                                        weights match the tempered training
+                                        objective.
+        chunk:       int                split `samples` along dim 0 into this many
+                                        chunks and accumulate. Reduces peak GPU
+                                        memory at the cost of wall time;
+                                        statistically and numerically equivalent
+                                        to chunk=1 (the per-sample log-weight
+                                        only depends on its own (x, F(x))).
     Output:
         w: Tensor [N]   unnormalized importance weights in [0, 1].
     """
-    log_w = importance_weights_log(samples, source, target, F, chunk=chunk)
+    log_w = importance_weights_log(samples, source, target, F, beta_source=beta_source, beta_target=beta_target, chunk=chunk)
     return (log_w - log_w.max()).exp()
 
-def importance_weights_log(samples: torch.Tensor, source: Potential, target: Potential, F: ComposedTransform, chunk: int = 1) -> torch.Tensor:
+def importance_weights_log(samples: torch.Tensor, source: Potential, target: Potential, F: ComposedTransform, beta_source: float = 1.0, beta_target: float = 1.0, chunk: int = 1) -> torch.Tensor:
     """
     Self-normalized importance-sampling log-weights for the proposal
-    `nu = F_# source` against the target `mu_1 ~ exp(-target)`, where
-    `F` is the trained bijection that pushes source samples toward the
-    target.
+    `nu = F_# mu_0` against the target `mu_1`, where the source and
+    target are the tempered Gibbs distributions
+        mu_0(x) ~ exp(-beta_source * source(x)),
+        mu_1(y) ~ exp(-beta_target * target(y)),
+    and `F` is the trained bijection that pushes source samples
+    toward the target.
 
-    For x ~ source, y = F(x), the proposal density is
-        log nu(y) = log source(x) - log|det J_F(x)|.
+    For x drawn from the (beta_source-tempered) source, y = F(x), the
+    proposal density is
+        log nu(y) = -beta_source * source(x) - log|det J_F(x)|.
     The unnormalized log-importance-weight is therefore
         log w(y) = log mu_1(y) - log nu(y)
-                 = -target(y) + source(x) + log|det J_F(x)|,
+                 = -beta_target * target(y) + beta_source * source(x)
+                   + log|det J_F(x)|,
     using `Potential` energies U = -log mu (up to additive constants
-    that cancel after self-normalization).
+    that cancel after self-normalization). Default
+    beta_source = beta_target = 1.0 recovers the standard case.
 
     Use the regular forward call (`source(x)`, `target(y)`); no
     `enable_eval()` opt-in is needed here since this routine is not on
     the per-iter MALA hot path.
 
     Input:
-        samples: Tensor [N, d]      particles drawn from `source`
-        source:  Potential          source (proposal-base) potential U_0
-        target:  Potential          target potential U_1
-        F:       ComposedTransform  forward flow map (typically obtained as flow.t())
-        chunk:   int                split `samples` along dim 0 into this many
-                                    chunks and concatenate the per-chunk
-                                    log-weights. Reduces peak GPU memory at
-                                    the cost of wall time; statistically and
-                                    numerically equivalent to chunk=1 (each
-                                    sample's log-weight depends only on its
-                                    own (x, F(x))).
+        samples:     Tensor [N, d]      particles drawn from `source`
+        source:      Potential          source (proposal-base) potential U_0
+        target:      Potential          target potential U_1
+        F:           ComposedTransform  forward flow map (typically obtained as flow.t())
+        beta_source: float              inverse temperature of the source
+                                        distribution (default 1.0).
+        beta_target: float              inverse temperature of the target
+                                        distribution (default 1.0). Pair this
+                                        with the same beta that was passed to
+                                        the loss / Langevin / HMC so the
+                                        weights match the tempered training
+                                        objective.
+        chunk:       int                split `samples` along dim 0 into this many
+                                        chunks and concatenate the per-chunk
+                                        log-weights. Reduces peak GPU memory at
+                                        the cost of wall time; statistically and
+                                        numerically equivalent to chunk=1 (each
+                                        sample's log-weight depends only on its
+                                        own (x, F(x))).
     Output:
         log_w: Tensor [N]   unnormalized log importance weights, ready
                             to feed into compute_ESS_log / compute_CESS_log
@@ -157,7 +182,7 @@ def importance_weights_log(samples: torch.Tensor, source: Potential, target: Pot
     out = []
     for x in torch.chunk(samples, chunk, dim=0):
         y, ladj = F.call_and_ladj(x)
-        out.append(-target(y) + source(x) + ladj)
+        out.append(-beta_target * target(y) + beta_source * source(x) + ladj)
     return torch.cat(out, dim=0)
 
 
@@ -353,34 +378,35 @@ def lbfgs(samples: torch.Tensor, potential: Potential, step: float = 1.0, iters:
 # Langevin — overdamped Langevin / MALA / tamed variants
 # ──────────────────────────────────────────────────────────────────────
 
-def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, iters: int = 100, adjust: bool = False, taming: float = 0, chunk: int = 1) -> torch.Tensor:
+def langevin(samples: torch.Tensor, potential: Potential, beta: float = 1.0, step: float = 1e-3, iters: int = 100, adjust: bool = False, taming: float = 0, chunk: int = 1) -> torch.Tensor:
     """
-    Langevin dynamics targeting the distribution exp(-U(x)).
+    Langevin dynamics targeting the tempered distribution exp(-beta * U(x)).
 
-    Proposal (Euler-Maruyama on the overdamped Langevin SDE):
-        y = x - step * grad U(x) + sqrt(2 * step) * xi,   xi ~ N(0, I_d).
+    Proposal (Euler-Maruyama on the overdamped Langevin SDE
+    dtheta = -beta * grad U(theta) dt + sqrt(2) dB):
+        y = x - step * beta * grad U(x) + sqrt(2 * step) * xi,   xi ~ N(0, I_d).
 
-    When `taming > 0`, the raw drift grad U(x) is replaced with the tamed
-    gradient
-        G(x) = grad U(x) / (1 + taming * ||grad U(x)||),
+    When `taming > 0`, the raw drift beta * grad U(x) is replaced with the
+    tamed effective force
+        G(x) = beta * grad U(x) / (1 + taming * ||beta * grad U(x)||),
     so that ||taming * G(x)|| <= 1. This stabilizes ULA on targets whose
     |grad U| grows super-linearly (polynomial-tail energies), where plain
     ULA can explode on outlier particles, and reduces to standard ULA in
-    the bulk (taming * ||grad U|| << 1). Tamed drift is incompatible with
-    adjust=True, since the MH correction below assumes the Gaussian
-    proposal centred on x - step * grad U(x).
+    the bulk (taming * ||beta * grad U|| << 1). Tamed drift is incompatible
+    with adjust=True, since the MH correction below assumes the Gaussian
+    proposal centred on x - step * beta * grad U(x).
 
     With adjust=False (default), every proposal is accepted; this is the
     unadjusted Langevin algorithm (ULA), which has an O(step) bias but
     needs only one gradient call per iteration. With adjust=True, each
     proposal is accepted via Metropolis-Hastings, giving the standard MALA
-    scheme whose stationary distribution is *exactly* exp(-U) (unbiased)
-    at the cost of ~2x runtime (two gradient calls per iteration).
+    scheme whose stationary distribution is *exactly* exp(-beta * U)
+    (unbiased) at the cost of ~2x runtime (two gradient calls per iteration).
 
     The MH acceptance probability is min(1, exp(log_alpha)) with
-        log_alpha = -U(y) + U(x) + log q(x|y) - log q(y|x),
+        log_alpha = beta * (U(x) - U(y)) + log q(x|y) - log q(y|x),
     where the proposal density is Gaussian:
-        log q(z|w) = -||z - w + step * grad U(w)||^2 / (4 * step) + const.
+        log q(z|w) = -||z - w + step * beta * grad U(w)||^2 / (4 * step) + const.
     Both the energy difference *and* the asymmetric-proposal correction are
     needed; using only the energy term leaves a residual O(step) bias.
 
@@ -394,11 +420,14 @@ def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, it
     Input:
         samples:   Tensor [N, d]   initial particles
         potential: Potential       target potential U; must support .grad(x)
+        beta:      float           inverse temperature; the stationary
+                                   distribution is exp(-beta * U). Default
+                                   1.0 recovers the standard scheme.
         step:      float           Euler-Maruyama step size
         iters:     int             number of Langevin steps
         adjust:    bool            if True, run MALA (unbiased); if False, run ULA
         taming:    float           if > 0, use tamed drift
-                                   grad U(x) / (1 + taming * ||grad U(x)||).
+                                   beta * grad U(x) / (1 + taming * ||beta * grad U(x)||).
                                    Stabilizes ULA on super-linearly growing
                                    potentials. Not compatible with adjust=True.
         chunk:     int             split `samples` along dim 0 into this many
@@ -425,16 +454,18 @@ def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, it
     out = []
     for x in torch.chunk(samples, chunk, dim=0):
         for _ in range(iters):
-            gx = potential.grad(x)
-            drift = gx / (1 + taming * gx.norm(dim=-1, keepdim=True)) if taming > 0 else gx
+            fx = beta * potential.grad(x) # effective force beta * grad U(x)
+            drift = fx / (1 + taming * fx.norm(dim=-1, keepdim=True)) if taming > 0 else fx
             y = x - step * drift + noise_scale * torch.randn_like(x)
             if adjust:
-                # log q(z|w) = -||z - w + step * grad U(w)||^2 / (4 * step) + const
-                # Consume gx (-> log_q_yx) BEFORE calling potential.grad(y)
-                log_q_yx = -((y - x + step * gx) ** 2).sum(dim=-1) / (4.0 * step) # log q(y|x)
-                gy = potential.grad(y)
-                log_q_xy = -((x - y + step * gy) ** 2).sum(dim=-1) / (4.0 * step) # log q(x|y)
-                log_alpha = -U(y) + U(x) + log_q_xy - log_q_yx # [N]
+                # log q(z|w) = -||z - w + step * beta * grad U(w)||^2 / (4 * step) + const
+                # Consume fx (-> log_q_yx) BEFORE calling potential.grad(y)
+                log_q_yx = -((y - x + step * fx) ** 2).sum(dim=-1) / (4.0 * step) # log q(y|x)
+                fy = beta * potential.grad(y)
+                log_q_xy = -((x - y + step * fy) ** 2).sum(dim=-1) / (4.0 * step) # log q(x|y)
+                # Evaluate U(y) then U(x); the -U(y) allocates a fresh tensor
+                # before U(x) overwrites the CUDA-Graphs eval output buffer.
+                log_alpha = beta * (-U(y) + U(x)) + log_q_xy - log_q_yx # [N]
                 accept = torch.rand_like(log_alpha).log() < log_alpha # [N] bool
                 x = torch.where(accept.unsqueeze(-1), y, x)
             else:
@@ -447,18 +478,20 @@ def langevin(samples: torch.Tensor, potential: Potential, step: float = 1e-3, it
 # HMC — Hamiltonian Monte Carlo with leapfrog + MH gate
 # ──────────────────────────────────────────────────────────────────────
 
-def hmc(samples: torch.Tensor, potential: Potential, step: float = 1e-2, iters: int = 10, burns: int = 10, chunk: int = 1) -> torch.Tensor:
+def hmc(samples: torch.Tensor, potential: Potential, beta: float = 1.0, step: float = 1e-2, iters: int = 10, burns: int = 10, chunk: int = 1) -> torch.Tensor:
     """
-    Hamiltonian Monte Carlo (HMC) targeting the distribution exp(-U(x)).
+    Hamiltonian Monte Carlo (HMC) targeting the tempered distribution
+    exp(-beta * U(x)).
 
     Each "burn" performs a full HMC trajectory:
       1. Resample momentum p ~ N(0, I_d) -- a complete, "high-temperature"
          refresh that discards any correlation with the previous burn.
-      2. Integrate the Hamiltonian flow of H(x, p) = U(x) + 0.5 * ||p||^2
-         for `iters` leapfrog steps of size `step`.
+      2. Integrate the Hamiltonian flow of H(x, p) = beta * U(x) + 0.5 * ||p||^2
+         for `iters` leapfrog steps of size `step`. Each kick uses the
+         effective force beta * grad U(x).
       3. Metropolis-Hastings accept/reject on the trajectory endpoint:
-            log_alpha = (U(x0) + 0.5 * ||p0||^2)
-                       - (U(x_end) + 0.5 * ||p_end||^2),
+            log_alpha = beta * (U(x0) - U(x_end))
+                       + 0.5 * (||p0||^2 - ||p_end||^2),
             accept with probability min(1, exp(log_alpha)).
          Leapfrog is exactly volume-preserving, so no Jacobian term enters.
 
@@ -496,6 +529,9 @@ def hmc(samples: torch.Tensor, potential: Potential, step: float = 1e-2, iters: 
     Input:
         samples:   Tensor [N, d]   initial particles
         potential: Potential       target potential U; must support .grad(x)
+        beta:      float           inverse temperature; stationary
+                                   distribution is exp(-beta * U). Default
+                                   1.0 recovers the standard HMC scheme.
         step:      float           leapfrog step size epsilon. Tune so the
                                    MH acceptance rate is ~0.6-0.8 (the HMC
                                    sweet spot from Beskos et al. 2013).
@@ -538,16 +574,19 @@ def hmc(samples: torch.Tensor, potential: Potential, step: float = 1e-2, iters: 
             K_start = 0.5 * (p_start ** 2).sum(dim=-1) # [N]
 
             # Efficient leapfrog: iters + 1 grad calls, combined half-kicks.
+            # Effective force is beta * grad U; the `beta *` allocates a
+            # fresh tensor each call, so g never aliases the CUDA-Graphs
+            # buffer behind potential.grad.
             p = p_start
             if iters >= 1:
-                g = potential.grad(x) # consumed before next .grad: no clone
+                g = beta * potential.grad(x)
                 p = p - 0.5 * step * g
                 for _ in range(iters - 1):
                     x = x + step * p
-                    g = potential.grad(x)
+                    g = beta * potential.grad(x)
                     p = p - step * g
                 x = x + step * p
-                g = potential.grad(x)
+                g = beta * potential.grad(x)
                 p = p - 0.5 * step * g
 
             U_end = U(x) # [N]
@@ -556,7 +595,7 @@ def hmc(samples: torch.Tensor, potential: Potential, step: float = 1e-2, iters: 
             # MH accept/reject with NaN guard: divergent trajectories
             # produce non-finite log_alpha -> -inf -> reject -> revert to
             # x_start, so the returned tensor is always finite.
-            log_alpha = (U_start + K_start) - (U_end + K_end) # [N]
+            log_alpha = beta * (U_start - U_end) + (K_start - K_end) # [N]
             log_alpha = torch.where(
                 torch.isfinite(log_alpha),
                 log_alpha,

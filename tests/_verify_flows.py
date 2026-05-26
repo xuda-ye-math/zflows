@@ -21,16 +21,21 @@ _zeros, _CNF_interface) into one banner-separated harness. Sections:
   11. CNF dual interface:   cnf.t()  ≡  cnf._ffj()
       (forward, inverse, round-trip, gradients all agree).
   12. Backprop reaches every parameter (RealNVP + CNF).
+  13. zflows.loss.compile  — runtime beta does not trigger recompiles.
 """
 
 import sys
 from math import pi
 
 import torch
+import torch._dynamo as dynamo
 
 from zflows.core.transforms import FreeFormJacobianTransform, CircularShiftTransform
 from zflows.flow import NSF, NCSF, CNF, RealNVP, Flow, ComposedTransform
-from zflows.utils import suppress_warnings
+import zflows.loss
+from zflows.loss import reverse_KL
+from zflows.potential import Gaussian
+from zflows.utils import suppress_warnings, set_cache_size_limit
 
 # Silence Triton/Inductor/Dynamo/Python warnings. No cache-limit bump needed:
 # this verification suite does not call torch.compile directly.
@@ -400,6 +405,45 @@ for name, flow, x_factory in [
         print(f"  FAIL: {name} missing grads on {n_params - n_grads} params")
         sys.exit(1)
 print("  [OK ] every parameter receives gradients")
+
+# ─────────────────────────────────────────────────────────────────
+banner("13. zflows.loss.compile: runtime beta does not trigger recompiles")
+# The returned closure casts a Python `float` beta to a 0-d tensor before
+# entering the compiled graph, so Dynamo treats beta as a dynamic input
+# and a single artifact handles every value of beta. Sweeping a dozen
+# distinct betas must NOT add any new graph traces.
+set_cache_size_limit(64) # generous headroom so a recompile, if any, surfaces in the counter rather than getting silently throttled
+
+torch.manual_seed(0)
+nsf_lc = NSF(a=[-3.0, -3.0], b=[3.0, 3.0], bins=8, transforms=2, hidden_features=(32, 32)).to(device)
+F_lc = nsf_lc.t()
+u_lc = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0], device=device)
+x_lc = torch.randn(64, 2, device=device)
+
+loss_fn = zflows.loss.compile(reverse_KL, u_lc, F_lc)
+
+# Warmup: pay the one-time compile cost on a representative beta.
+_ = loss_fn(x_lc, 0.1).item()
+
+# Sweep distinct betas and count newly-traced graphs.
+betas = [0.2, 0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0]
+c0 = dynamo.utils.counters["stats"]["unique_graphs"]
+losses = []
+for b in betas:
+    losses.append(loss_fn(x_lc, b).item())
+delta = dynamo.utils.counters["stats"]["unique_graphs"] - c0
+print(f"  unique_graphs delta across {len(betas)} betas: {delta}  (expect 0 — single compiled artifact)")
+if delta != 0:
+    print(f"  FAIL: Dynamo recompiled {delta} time(s); beta is leaking value-specialization")
+    sys.exit(1)
+
+# Numerical correctness: compiled loss must match raw reverse_KL at every beta.
+for b, l_c in zip(betas, losses):
+    l_r = reverse_KL(x_lc, u_lc, F_lc, beta=b).item()
+    if abs(l_c - l_r) > 1e-3:
+        print(f"  FAIL: beta={b}: compiled={l_c}, raw={l_r}, diff={abs(l_c-l_r):.3e}")
+        sys.exit(1)
+print(f"  [OK ] one compiled graph reused across {len(betas)} betas; outputs match raw reverse_KL")
 
 # ─────────────────────────────────────────────────────────────────
 print()

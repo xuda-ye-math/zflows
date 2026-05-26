@@ -53,7 +53,19 @@ g = u.grad(x) # x: [N, d] -> g: [N, d], no requires_grad_ on x needed
 
 The gradient closure is built once, cached on the instance, and reused every call — making heavy-load Langevin / MALA sampling fast (one fused kernel per step instead of an autograd graph rebuild). The call is idempotent and chainable; calling `.grad()` without `.enable_grad()` raises a clear `RuntimeError`.
 
-**One-line compilable KL losses.** `reverse_KL(x, target, F)` and `forward_KL(y, source, F)` are direct-call functions returning a scalar loss. For heavy-load training (e.g. annealed Boltzmann generators with thousands of steps per bridge) wrap the loss once with `zflows.loss.compile(...)` to capture `(potential, transform)` as closure constants and fuse the forward into a CUDA graph — typically **4–10× faster per training step** ([benchmark](tests/compare_compiled_loss.md)):
+**One-line compilable KL losses.** `reverse_KL(x, target, F, beta=1.0)` and `forward_KL(y, source, F, beta=1.0)` are direct-call functions returning a scalar loss; `beta` is the inverse temperature scaling the potential. The natural training loop just calls them in place:
+
+```python
+from zflows.loss import reverse_KL
+
+F = flow.t()
+
+for x_batch in batches:
+    loss = reverse_KL(x_batch, target, F, beta=1.0)
+    optimizer.zero_grad(); loss.backward(); optimizer.step()
+```
+
+For heavy-load training (e.g. annealed Boltzmann generators with thousands of steps per bridge) wrap the loss once with `zflows.loss.compile(...)` to capture `(potential, transform)` as closure constants and fuse the forward into a CUDA graph — typically **4–10× faster per training step** ([benchmark](tests/compare_compiled_loss.md)). `beta` becomes a runtime argument of the returned closure, so adaptive / annealed schedules vary it across steps without triggering a recompile:
 
 ```python
 import zflows
@@ -64,25 +76,31 @@ F = flow.t()
 loss_fn = zflows.loss.compile(reverse_KL, target, F, mode='reduce-overhead')
 
 for x_batch in batches:
-    loss = loss_fn(x_batch)
+    loss = loss_fn(x_batch, beta=1.0)
     optimizer.zero_grad(); loss.backward(); optimizer.step()
 ```
 
-The first few steps pay a one-time Triton / Inductor compile cost; every step after that is a single fused kernel replay. `mode='default'` is the safe choice; `mode='reduce-overhead'` uses CUDA Graphs and is fastest at small $d$. Pair with `zflows.utils.suppress_warnings()` to silence the compile-time chatter.
+The first few steps pay a one-time Triton / Inductor compile cost; every step after that is a single fused kernel replay. `mode='default'` is the safe choice; `mode='reduce-overhead'` uses CUDA Graphs and is fastest at small $d$. `beta` is internally cast to a 0-d tensor so a single compiled artifact handles every schedule value. Pair with `zflows.utils.suppress_warnings()` to silence the compile-time chatter.
 
-**SMC-style utilities.** Direct-call building blocks for the *propose → reweight → resample → rejuvenate* loop:
+**SMC-style utilities.** Direct-call building blocks for the *propose → reweight → resample → rejuvenate* loop, with optional inverse-temperature inputs (default `beta = 1.0` recovers the standard case):
 
 ```python
-from zflows.utils import importance_weights, resample, langevin, compute_ESS, compute_CESS
+from zflows.utils import importance_weights, resample, langevin, hmc, compute_ESS, compute_CESS
 
-importance_weights(samples, source, target, F, chunk=1)   # log w = -target(F(x)) + source(x) + log|det J_F|
+importance_weights(samples, source, target, F, beta_source=1.0, beta_target=1.0, chunk=1)
+                                                          # log w = -beta_target * target(F(x))
+                                                          #         + beta_source * source(x) + log|det J_F|
 resample(samples, weights)                                # multinomial resampling with replacement
-langevin(samples, potential, step, iters, adjust=False, chunk=1) # alias: rejuvenation; adjust=True -> MALA
+langevin(samples, potential, beta=1.0, step=1e-3, iters=100, adjust=False, chunk=1)
+                                                          # alias: rejuvenation; adjust=True -> MALA
+                                                          # stationary distribution: exp(-beta * potential)
+hmc(samples, potential, beta=1.0, step=1e-2, iters=10, burns=10, chunk=1)
+                                                          # Hamiltonian Monte Carlo; stationary: exp(-beta * potential)
 compute_ESS(weights)                                      # importance-sampling diagnostic
 compute_CESS(source_weights, importance_weights)          # conditional ESS diagnostic
 ```
 
-`chunk` splits the batch along dim 0 to bound peak VRAM (statistically equivalent to `chunk=1`).
+`beta` controls the tempering for the samplers and lets `importance_weights` reweight between two tempered ladder rungs (e.g. anneal `beta_target` from 0 to 1 while holding `beta_source = 1`). `chunk` splits the batch along dim 0 to bound peak VRAM (statistically equivalent to `chunk=1`).
 
 Together these compose into a complete *propose → reweight → resample → rejuvenate* pipeline with no glue code on the user side.
 
@@ -221,23 +239,23 @@ Result on an RTX 5070 Ti (committed [`tests/compare_compiled_loss.csv`](tests/co
 
 | dimension | hidden_features | raw ms | default ms | reduce ms | speedup default | speedup reduce |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-|  2 | (64, 64)   |  6.05 | 1.24 | 0.46 |  4.86 | 13.25 |
-|  2 | (128, 128) |  5.99 | 1.24 | 0.46 |  4.85 | 13.03 |
-|  2 | (256, 256) |  6.00 | 1.26 | 0.61 |  4.78 |  9.88 |
-|  4 | (64, 64)   |  6.00 | 1.34 | 0.47 |  4.48 | 12.92 |
-|  4 | (128, 128) |  6.00 | 1.25 | 0.49 |  4.80 | 12.36 |
-|  4 | (256, 256) |  6.02 | 1.38 | 0.73 |  4.36 |  8.25 |
-|  8 | (64, 64)   |  5.96 | 1.39 | 0.54 |  4.28 | 10.96 |
-|  8 | (128, 128) |  5.38 | 1.40 | 0.58 |  3.85 |  9.31 |
-|  8 | (256, 256) |  5.55 | 1.39 | 0.85 |  4.00 |  6.52 |
-| 16 | (64, 64)   |  6.83 | 1.39 | 0.65 |  4.91 | 10.50 |
-| 16 | (128, 128) |  6.94 | 1.44 | 0.80 |  4.83 |  8.71 |
-| 16 | (256, 256) |  7.24 | 1.33 | 1.10 |  5.44 |  6.60 |
-| 32 | (64, 64)   | 12.24 | 1.26 | 1.05 |  9.74 | 11.67 |
-| 32 | (128, 128) | 12.33 | 1.28 | 1.21 |  9.65 | 10.16 |
-| 32 | (256, 256) | 12.81 | 1.70 | 1.67 |  7.56 |  7.65 |
+|  2 | (64, 64)   |  5.65 | 1.38 | 0.54 |  4.10 | 10.42 |
+|  2 | (128, 128) |  5.42 | 1.37 | 0.55 |  3.96 |  9.92 |
+|  2 | (256, 256) |  5.50 | 1.25 | 0.61 |  4.40 |  8.99 |
+|  4 | (64, 64)   |  5.43 | 1.38 | 0.55 |  3.92 |  9.89 |
+|  4 | (128, 128) |  5.47 | 1.38 | 0.55 |  3.96 | 10.03 |
+|  4 | (256, 256) |  5.48 | 1.39 | 0.73 |  3.95 |  7.51 |
+|  8 | (64, 64)   |  5.66 | 1.30 | 0.46 |  4.36 | 12.19 |
+|  8 | (128, 128) |  6.03 | 1.29 | 0.58 |  4.66 | 10.42 |
+|  8 | (256, 256) |  6.01 | 1.34 | 0.85 |  4.48 |  7.08 |
+| 16 | (64, 64)   |  6.82 | 1.35 | 0.65 |  5.04 | 10.42 |
+| 16 | (128, 128) |  6.93 | 1.39 | 0.80 |  4.98 |  8.61 |
+| 16 | (256, 256) |  7.23 | 1.39 | 1.10 |  5.21 |  6.57 |
+| 32 | (64, 64)   | 12.18 | 1.38 | 1.04 |  8.83 | 11.77 |
+| 32 | (128, 128) | 12.74 | 1.40 | 1.28 |  9.12 |  9.99 |
+| 32 | (256, 256) | 13.40 | 1.78 | 1.80 |  7.55 |  7.46 |
 
-The raw baseline starts rising at $d \ge 16$ — by $d = 32$ it has roughly doubled to ~12 ms regardless of `hidden_features`, which is where GPU compute begins to dominate over Python launch overhead. `reduce-overhead` consistently delivers 6.5–13× per-step speedup; `default` mode (no CUDA Graphs) delivers 4–10×. The speedup persists at the largest cell ($d = 32$, `hidden_features = (256, 256)`) at ~7.6×, well past the point where the bottleneck shifts from Python to compute. See the [writeup](tests/compare_compiled_loss.md) for the methodology (warmup, sanity check, cache-size limits) and three observations on how the gap scales.
+The raw baseline starts rising at $d \ge 16$ — by $d = 32$ it has roughly doubled to ~12–13 ms regardless of `hidden_features`, which is where GPU compute begins to dominate over Python launch overhead. `reduce-overhead` consistently delivers 6.5–12× per-step speedup; `default` mode (no CUDA Graphs) delivers ~4–9×. The speedup persists at the largest cell ($d = 32$, `hidden_features = (256, 256)`) at ~7.5×, well past the point where the bottleneck shifts from Python to compute. See the [writeup](tests/compare_compiled_loss.md) for the methodology (warmup, sanity check, cache-size limits) and three observations on how the gap scales.
 
 </details>
 

@@ -261,14 +261,22 @@ class Gaussian(Potential):
         """
         return 0.5 * ((x - self.mean) ** 2 / self.variance).sum(dim=-1)
 
-    def samples(self, N: int) -> torch.Tensor:
+    def samples(self, N: int, beta: float = 1.0) -> torch.Tensor:
         """
-        Generate N independent samples from the diagonal Gaussian
+        Generate N independent samples from the tempered diagonal
+        Gaussian mu_beta ~ exp(-beta * U(x)). Since
+            U(x) = 0.5 * sum_i (x_i - mean_i)^2 / variance_i,
+        the beta-tempered distribution is N(mean, variance / beta),
+        i.e. the same mean with covariance scaled by 1/beta. Default
+        beta=1.0 reproduces the original sampler exactly.
+        Input:
+            N:    int     number of samples
+            beta: float   inverse temperature (default 1.0)
         Output:
             x: Tensor [N, d]
         """
         z = torch.randn(N, self.d, device=self.device)
-        return self.mean + self.variance.sqrt() * z
+        return self.mean + (self.variance / beta).sqrt() * z
     
 class Gaussian_Mixture(Potential):
     """

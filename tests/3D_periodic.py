@@ -62,9 +62,12 @@ optimizer = torch.optim.Adam(flow.parameters(), lr=LR)
 
 # Compile the reverse-KL training step once. F = flow.t() is captured here
 # but the lazy machinery re-reads flow's nn.Parameters by attribute access
-# on every forward, so optimizer.step() updates flow correctly.
+# on every forward, so optimizer.step() updates flow correctly. beta is a
+# runtime arg of loss_fn; pre-allocate it as a 0-d tensor so we don't pay
+# a torch.as_tensor() allocation on every step.
 F = flow.t()
 loss_fn = zflows.loss.compile(reverse_KL, u1, F)
+beta_t = torch.tensor(1.0, device=device)
 
 for epoch in range(EPOCH):
     perm = torch.randperm(N, device=device)
@@ -74,7 +77,7 @@ for epoch in range(EPOCH):
         idx = perm[start:start + BATCH]
         x_batch = x[idx]
 
-        loss = loss_fn(x_batch)
+        loss = loss_fn(x_batch, beta_t)
 
         optimizer.zero_grad()
         loss.backward()

@@ -77,17 +77,30 @@ def build_loss_fn(
     flow: NSF,
     potential: Gaussian,
 ) -> Callable[[torch.Tensor], torch.Tensor]:
-    """Return a callable (x_batch) -> scalar loss for the requested mode."""
+    """Return a callable (x_batch) -> scalar loss for the requested mode.
+
+    For the compiled modes we pre-allocate a 0-d `beta` tensor and bind it
+    into the closure so the inner loop's call site looks like
+    `loss_fn(x_batch)` while the compile wrapper's fast path (beta is
+    already a Tensor) skips the per-step torch.as_tensor() allocation.
+    """
     if mode == "raw":
         # match the existing 4D_Boltzmann_generator.py pattern verbatim
         def raw_loss(x: torch.Tensor) -> torch.Tensor:
             return reverse_KL(x, target=potential, F=flow.t())
         return raw_loss
+
     if mode == "default":
-        return zloss.compile(reverse_KL, potential, flow.t(), mode="default")
-    if mode == "reduce-overhead":
-        return zloss.compile(reverse_KL, potential, flow.t(), mode="reduce-overhead")
-    raise ValueError(f"unknown mode {mode!r}")
+        compiled = zloss.compile(reverse_KL, potential, flow.t(), mode="default")
+    elif mode == "reduce-overhead":
+        compiled = zloss.compile(reverse_KL, potential, flow.t(), mode="reduce-overhead")
+    else:
+        raise ValueError(f"unknown mode {mode!r}")
+
+    beta_t = torch.tensor(1.0, device=next(flow.parameters()).device)
+    def call(x: torch.Tensor) -> torch.Tensor:
+        return compiled(x, beta_t)
+    return call
 
 
 def time_full_step(

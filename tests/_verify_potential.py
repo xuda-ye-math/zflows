@@ -19,6 +19,10 @@ harness. Sections:
         - samples have sensible moments (per-axis mean / std finite);
         - scatter plot saved to tests/_verify_potential.png for visual
           verification.
+
+   C. Gaussian.samples(N, beta=...):
+        - default vs beta=1.0 is byte-identical;
+        - empirical variance contracts as 1/beta (tempered N(mean, var/beta)).
 """
 
 from pathlib import Path
@@ -217,6 +221,38 @@ print(f"  scatter saved → {png}")
 ulc.release()
 u0.release()
 u1.release()
+
+
+# ══════════════════════════════════════════════════════════════════
+# C. Gaussian.samples(N, beta=...)
+# ══════════════════════════════════════════════════════════════════
+banner("C. Gaussian.samples — tempered draws from N(mean, var / beta)")
+
+g_temp = Gaussian(mean=[0.0, 0.0, 0.0], variance=[1.0, 4.0, 0.25], device=device)
+
+# C.1 — defaulted beta vs beta=1.0 must be byte-identical under the same seed
+section("C.1  default vs beta=1.0 is byte-identical")
+torch.manual_seed(101)
+s_def = g_temp.samples(20000)
+torch.manual_seed(101)
+s_b1  = g_temp.samples(20000, beta=1.0)
+print(f"  equal = {torch.equal(s_def, s_b1)}")
+assert torch.equal(s_def, s_b1)
+print("  [OK ] defaults match explicit beta=1.0")
+
+# C.2 — empirical variance contracts as 1/beta on each axis
+section("C.2  empirical per-axis variance scales as variance / beta")
+torch.manual_seed(102)
+target_var = torch.tensor([1.0, 4.0, 0.25], device=device)
+for beta in (0.5, 1.0, 4.0):
+    s = g_temp.samples(50000, beta=beta)
+    emp_var = s.var(dim=0)
+    expected = target_var / beta
+    err = (emp_var - expected).abs().max().item()
+    print(f"  beta = {beta:>3}:  var = {emp_var.tolist()}   (expect {expected.tolist()})   max err = {err:.3e}")
+    assert err < 0.1, f"beta={beta}: empirical variance off by {err}"
+print("  [OK ] tempered variance contracts as 1/beta")
+
 
 # ─────────────────────────────────────────────────────────────────
 print()
