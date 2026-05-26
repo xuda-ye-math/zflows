@@ -322,16 +322,7 @@ True
 
 It runs three checks: (1) OS is Linux — non-Linux emits a warning but doesn't fail; (2) `nvcc` is on `$PATH` — warns if missing; (3) **the authoritative step**: actually `torch.compile`'s a small probe function under the same `mode='reduce-overhead'` zflows uses internally, and returns `True` iff that succeeds.
 
-The first two checks are warnings only; the bool return value reflects only the sanity test. Failure on (2) is the most common cause of the "C compiler not found" / "`nvcc` not found" errors that surface on the first call to `Potential.enable_grad` / `Potential.enable_eval`. To fix that:
-
-</details>
-
-<details>
-<summary><strong>Q: I'm on Linux, but the first call to <code>enable_grad</code> / <code>enable_eval</code> fails with an error about not finding a C compiler. What's missing?</strong></summary>
-
-You need the **CUDA Toolkit** installed, not just the CUDA runtime that ships with the PyTorch wheel. `torch.compile` (used inside `Potential.enable_grad` / `Potential.enable_eval`) invokes Triton / TorchInductor, which JIT-compiles a small CUDA helper at first call — and that step requires the NVIDIA C/C++ compiler `nvcc` from the CUDA Toolkit. Without it, Triton has no compiler to drive and you see a "C compiler not found" (or "`nvcc` not found") error.
-
-Install the toolkit through your distro's package manager (e.g. `cuda-toolkit` on Ubuntu/Arch) or from [NVIDIA's downloads page](https://developer.nvidia.com/cuda-downloads), then make sure `nvcc --version` works from your shell before re-running. `zflows.utils.check_compile_available()` (above) is the fastest way to confirm the fix worked.
+The first two checks are warnings only; the bool return value reflects only the sanity test. Failure on (2) is the most common cause of the "C compiler not found" / "`nvcc` not found" errors that surface on the first call to `Potential.enable_grad` / `Potential.enable_eval` / `zflows.loss.compile`: `torch.compile` invokes Triton / TorchInductor, which JIT-compiles a small CUDA helper at first call, and that step needs the NVIDIA C/C++ compiler `nvcc` from the **CUDA Toolkit** (not just the CUDA runtime that ships with the PyTorch wheel). Install the toolkit through your distro's package manager (e.g. `cuda-toolkit` on Ubuntu / Arch) or from [NVIDIA's downloads page](https://developer.nvidia.com/cuda-downloads), then re-run `check_compile_available()` to confirm `nvcc` is on `$PATH` and the sanity test passes.
 
 </details>
 
@@ -379,6 +370,29 @@ for x_batch in batches:
 The pattern that *doesn't* work is `torch.compile(my_loss)` and then passing the flow / potentials as runtime arguments — each call would build a fresh `flow.t()`, Dynamo would re-guard on its object identity, and the cache would either thrash or hit `BACKEND_MATCH` failures. `zflows.loss.compile` sidesteps both by stuffing the Python-heavy arguments into the closure. If you mix multiple distinct loss-function shapes in the same script, raise `torch._dynamo.config.cache_size_limit` (or use the helper `zflows.utils.set_cache_size_limit(N)`) so Dynamo doesn't evict your specializations.
 
 If your loss takes keyword-only arguments or needs more elaborate dispatch, write a thin wrapper that closes over them and pass the wrapper into `zflows.loss.compile`. This is the kind of small mechanical refactor that AI coding assistants (e.g. [Claude Code](https://claude.com/claude-code), which built this project) handle well.
+
+</details>
+
+<details>
+<summary><strong>Q: Does <code>zflows</code> support conditional normalizing flows?</strong></summary>
+
+No. `zflows` is designed for Boltzmann-generator / energy-based sampling, where you train *one* flow against *one* unconditional target distribution. The `context` / conditional-on-`c` plumbing that general-purpose flow libraries carry is dead weight in this setting, so it was dropped on purpose when porting the core machinery from zuko — see the package docstring in [`zflows/__init__.py`](zflows/__init__.py).
+
+If you need conditional flows, use [zuko](https://github.com/probabilists/zuko) directly. Its `Flow` / `Transform` / masked-MLP machinery is the same shape as what `zflows.core` vendors — what we removed was just the `context` argument threaded through every layer — so the API will feel familiar, and zuko has been hardened for the conditional-density-estimation / SBI use cases that motivated it.
+
+</details>
+
+<details>
+<summary><strong>Q: I'm using JAX rather than PyTorch — how can I implement normalizing flows?</strong></summary>
+
+`zflows` is PyTorch-only and has no plans to port. For JAX you have two solid options:
+
+- [**Distrax**](https://github.com/google-deepmind/distrax) (**recommended**) — DeepMind's JAX/TFP-style probability and bijector library. Officially maintained inside Google's open-source stack, broad bijector coverage (RQS, affine, masked autoregressive, etc.), and the API mirrors `tensorflow_probability.substrates.jax` so it composes cleanly with the rest of the JAX/Flax/Haiku ecosystem.
+- [**FlowJAX**](https://github.com/danielward27/flowjax) — flow-focused library by Daniel Ward, smaller surface area but ergonomic for the common "fit a flow to samples or a target density" workflow.
+
+Neither is a drop-in replacement for the energy-based sampling / Boltzmann-generator pipeline `zflows` is built around — both target the SBI / density-estimation use cases — so expect to assemble the *propose → reweight → resample → rejuvenate* loop yourself out of their primitives.
+
+On raw speed: with `torch.compile` in the training loop (via `zflows.loss.compile` / `Potential.enable_grad` / `Potential.enable_eval`), the per-step gap between JAX and PyTorch is typically minor. What PyTorch still gives you for free is a natural OOP layout centered on `nn.Module` — `Flow`, `Potential`, and their subclasses all inherit from it, so `.to(device)`, `.parameters()`, `.state_dict()`, and `optimizer.step()` work without extra plumbing. JAX has no equivalent default and routes parameters explicitly. Random number generation is similar: PyTorch's global `torch.manual_seed(...)` is sufficient for the Langevin / MALA / HMC routines in `zflows.utils`, while JAX requires you to thread a `PRNGKey` through every sampler call.
 
 </details>
 
