@@ -543,6 +543,13 @@ On raw speed: with `torch.compile` in the training loop (via `loss_compile` / `l
 
 </details>
 
+<details>
+<summary><strong>Q: How can I apply <code>zflows</code> on real molecules rather than the toy examples?</strong></summary>
+
+The maintainer is working to combine `zflows` with [torchmd](https://github.com/torchmd/torchmd) and [openmm](https://github.com/openmm/openmm) so that a real Amber-style full-atom potential plugs in as a `zflows.Potential` subclass.
+
+</details>
+
 ## Acknowledgements
 
 `zflows` is strongly inspired by [zuko](https://github.com/probabilists/zuko); the flow, transform, and masked-MLP machinery vendored into `zflows.core` is a stripped-down port of zuko's. Credit for the underlying design — and for the clean, composable `Transform` API the public flows build on — belongs to the zuko authors.
