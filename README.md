@@ -35,9 +35,9 @@ y, ladj = F.call_and_ladj(x) # forward & log|det J|
 x_back = F.inv(y) # inverse
 ```
 
-Both continuous flows (`CNF`, `OTFlow`) integrate with a fixed-step RK4 scheme (the only integrator in zflows — `nt` steps, no adaptive solver), which keeps the per-step flop budget deterministic and is friendly to `torch.compile`. `OTFlow` parameterises the ODE velocity as the gradient of a learnable scalar potential, so its log-det trace is closed-form ($O(d\cdot m)$) rather than via the augmented-Jacobian ODE that `CNF` uses; it also exposes the optimal-transport regularizers through [`zflows.loss.OT_loss`](zflows/loss.py) (plain `reverse_KL` simply drops them).
+`CNF` and `OTFlow` both use a fixed-step RK4 integrator (`nt` steps, no adaptive solver), so the per-step cost is deterministic and `torch.compile`-friendly.
 
-Swapping one flow class for another is a one-line change. Per-class hyperparameters are documented in [`flow.py`](zflows/flow.py). Every flow class also exposes `flow.zeros()`, which initialises the network so that the flow map is exactly the identity. The `randmask: bool = True` parameter shared by `NSF`, `NCSF`, and `RealNVP` controls per-layer feature ordering — `True` (default) draws a fresh `torch.randperm(d)` each layer (recommended at $d \geq 4$), `False` uses the legacy `arange / arange.flip` alternation; seed externally with `torch.manual_seed(...)` for reproducibility.
+Swapping flow classes is a one-line change. Every class also exposes `flow.zeros()` (initialise to the identity bijection) and a shared `randmask: bool = True` knob on `NSF` / `NCSF` / `RealNVP` (fresh `torch.randperm` per layer; set `False` for the legacy alternating mask). Per-class hyperparameters are documented in [`flow.py`](zflows/flow.py).
 
 **Unified `Potential` class.** Every energy function in `zflows` — built-in (`Gaussian`, `Uniform`, `Gaussian_Mixture`) or user-defined — subclasses one `Potential` base. Define a custom potential by subclassing `Potential` and implementing `forward(x)`:
 
@@ -52,7 +52,21 @@ class U(Potential): # any user-defined energy
         return ...
 ```
 
-The `def __init__(self): super().__init__()` boilerplate is **always recommended**, even when you have no extra state to initialize. Skipping `super().__init__()` leaves `nn.Module`'s internal dicts (`_parameters`, `_buffers`, `_backward_hooks`, …) uncreated, and the next call `u(x)` fails with a cryptic `AttributeError` from inside `nn.Module.__call__`. Keeping the line costs one line of code and immunizes the class against future edits that *do* add state.
+The `def __init__(self): super().__init__()` boilerplate is **always recommended**, even when you have no extra state to initialize — skipping it leaves `nn.Module`'s internals uncreated and the next call `u(x)` fails with a cryptic `AttributeError`.
+
+If there are no constructor args and no extra state to worry about, you can also define the `Potential` inline from a plain `(x) -> Tensor` callable using `Potential._from(...)`:
+
+```python
+from zflows.potential import Potential
+
+def U(x: torch.Tensor) -> torch.Tensor: # U(x): Tensor [N, d] -> Tensor [N]
+    return ...
+
+u = Potential._from(U).to(device).enable_grad()
+g = u.grad(x) # full toolchain still works
+```
+
+(The method name is `_from`, not `from`, because `from` is a Python keyword.) For potentials that carry state — physical constants, learnable sub-modules, etc. — subclass `Potential` directly as above.
 
 For Boltzmann-generator bridges and richer multi-rung mixtures, `Linear_Combination` composes any number of `Potential` instances into a single `U(x) = Σ_k c_k U_k(x)`, evaluated as one chained sum rather than nested compositions:
 
@@ -425,9 +439,9 @@ Run `zflows.utils.check_compile_available()` interactively (or in a one-off stan
 True
 ```
 
-It runs three checks: (1) OS is Linux — non-Linux emits a warning but doesn't fail; (2) `nvcc` is on `$PATH` — warns if missing; (3) **the authoritative step**: actually `torch.compile`'s a small probe function under the same `mode='reduce-overhead'` zflows uses internally, and returns `True` iff that succeeds.
+It runs three checks: (1) OS is Linux — non-Linux emits a warning but doesn't fail; (2) `nvcc` is reachable — `shutil.which("nvcc")` first, then the Ubuntu default install locations `/usr/local/cuda/bin/nvcc` and `/usr/local/cuda-*/bin/nvcc` as fallbacks; warns if none match; (3) **the authoritative step**: actually `torch.compile`'s a small probe function under the same `mode='reduce-overhead'` zflows uses internally, and returns `True` iff that succeeds.
 
-The first two checks are warnings only; the bool return value reflects only the sanity test. Failure on (2) is the most common cause of the "C compiler not found" / "`nvcc` not found" errors that surface on the first call to `Potential.enable_grad` / `Potential.enable_eval` / `compile_raw` / `compile_beta`: `torch.compile` invokes Triton / TorchInductor, which JIT-compiles a small CUDA helper at first call, and that step needs the NVIDIA C/C++ compiler `nvcc` from the **CUDA Toolkit** (not just the CUDA runtime that ships with the PyTorch wheel). Install the toolkit through your distro's package manager (e.g. `cuda-toolkit` on Ubuntu / Arch) or from [NVIDIA's downloads page](https://developer.nvidia.com/cuda-downloads), then re-run `check_compile_available()` to confirm `nvcc` is on `$PATH` and the sanity test passes.
+The first two checks are warnings only; the bool return value reflects only the sanity test. Failure on (2) is the most common cause of the "C compiler not found" / "`nvcc` not found" errors that surface on the first call to `Potential.enable_grad` / `Potential.enable_eval` / `compile_raw` / `compile_beta`: `torch.compile` invokes Triton / TorchInductor, which JIT-compiles a small CUDA helper at first call, and that step needs the NVIDIA C/C++ compiler `nvcc` from the **CUDA Toolkit** (not just the CUDA runtime that ships with the PyTorch wheel). Install the toolkit through your distro's package manager or from [NVIDIA's downloads page](https://developer.nvidia.com/cuda-downloads); if the toolkit lives at the Ubuntu default `/usr/local/cuda/bin/nvcc` or `/usr/local/cuda-X.Y/bin/nvcc` the fallback picks it up automatically, otherwise add it to `$PATH` and re-run `check_compile_available()`.
 
 </details>
 

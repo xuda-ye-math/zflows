@@ -23,6 +23,11 @@ harness. Sections:
    C. Gaussian.samples(N, beta=...):
         - default vs beta=1.0 is byte-identical;
         - empirical variance contracts as 1/beta (tempered N(mean, var/beta)).
+
+   D. Potential._from(fn):
+        - wrapped callable matches fn(x) under forward;
+        - enable_grad() + enable_eval() chain through;
+        - .grad(x) matches autograd of fn(x).sum() w.r.t. x.
 """
 
 from pathlib import Path
@@ -252,6 +257,49 @@ for beta in (0.5, 1.0, 4.0):
     print(f"  beta = {beta:>3}:  var = {emp_var.tolist()}   (expect {expected.tolist()})   max err = {err:.3e}")
     assert err < 0.1, f"beta={beta}: empirical variance off by {err}"
 print("  [OK ] tempered variance contracts as 1/beta")
+
+
+# ══════════════════════════════════════════════════════════════════
+# D. Potential._from(fn) — wrap a callable as a Potential
+# ══════════════════════════════════════════════════════════════════
+banner("D. Potential._from(fn) wraps a stateless callable")
+
+def _U_from(x: torch.Tensor) -> torch.Tensor:
+    # U(x) = 0.5 ||x||^2 + 2 * cos(x_1)
+    x1 = x[:, 0]
+    return 0.5 * (x ** 2).sum(-1) + 2 * torch.cos(x1)
+
+# D.1 — forward identity
+section("D.1  _from(fn).forward(x) ≡ fn(x)")
+u_fn = Potential._from(_U_from).to(device)
+x_fn = torch.randn(64, 3, device=device)
+y_potential = u_fn(x_fn)
+y_direct    = _U_from(x_fn)
+diff = (y_potential - y_direct).abs().max().item()
+print(f"  max |Potential._from(fn)(x) - fn(x)| = {diff:.3e}")
+assert diff == 0.0, f"forward drift: {diff}"
+print("  [OK ] wrapped forward matches the underlying callable")
+
+# D.2 — enable_eval(), enable_grad() chain through
+section("D.2  enable_eval / enable_grad work on the wrapped Potential")
+u_fn = Potential._from(_U_from).to(device).enable_grad().enable_eval()
+assert u_fn._grad_fn is not None and u_fn._eval_fn is not None, \
+    "enable_grad / enable_eval didn't populate the cached fns"
+
+v_eval = u_fn.eval(x_fn)
+err_eval = (v_eval - y_direct).abs().max().item()
+print(f"  max |u.eval(x) - fn(x)| = {err_eval:.3e}")
+assert err_eval < 1e-4, f"eval drift: {err_eval}"
+
+g_potential = u_fn.grad(x_fn)
+# autograd reference: gradient of sum_i U(x_i) w.r.t. x
+x_ref = x_fn.clone().detach().requires_grad_(True)
+y_ref = _U_from(x_ref).sum()
+(g_ref,) = torch.autograd.grad(y_ref, x_ref)
+err_grad = (g_potential - g_ref).abs().max().item()
+print(f"  max |u.grad(x) - autograd(fn)| = {err_grad:.3e}")
+assert err_grad < 1e-4, f"grad drift: {err_grad}"
+print("  [OK ] compiled grad / eval fast paths match autograd / fn(x)")
 
 
 # ─────────────────────────────────────────────────────────────────

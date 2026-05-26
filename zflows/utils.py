@@ -676,21 +676,33 @@ def check_compile_available() -> bool:
         )
         print(f"[WARN] OS = {sys_name}  (torch.compile may not work)")
 
-    # (2) nvcc check — warn, do not gate (CPU-only setups don't need it)
+    # (2) nvcc check — warn, do not gate (CPU-only setups don't need it).
+    # Try $PATH first, then fall back to the Ubuntu default install
+    # locations that `cuda-toolkit` leaves off $PATH unless the user
+    # explicitly added them: the symlinked /usr/local/cuda/bin/nvcc and,
+    # for side-by-side installs, the versioned /usr/local/cuda-*/bin/nvcc.
+    from pathlib import Path
     nvcc_path = shutil.which("nvcc")
+    if nvcc_path is None:
+        candidates = [Path("/usr/local/cuda/bin/nvcc")]
+        # Versioned installs (e.g. /usr/local/cuda-12.4/bin/nvcc); newest first.
+        candidates += sorted(
+            Path("/usr/local").glob("cuda-*/bin/nvcc"), reverse=True
+        )
+        for c in candidates:
+            if c.is_file():
+                nvcc_path = str(c)
+                break
     if nvcc_path is not None:
         print(f"[OK ]   nvcc = {nvcc_path}")
     else:
         warnings.warn(
-            "nvcc not found on $PATH. torch.compile's Triton / TorchInductor "
-            "backend needs the CUDA Toolkit's C++ compiler (nvcc) when "
-            "compiling CUDA kernels — the CUDA runtime that ships with the "
-            "PyTorch wheel is NOT enough. Install the full toolkit via your "
-            "distro's package manager (`cuda-toolkit` on Ubuntu/Arch) or "
+            "nvcc not found on $PATH or in /usr/local/cuda/bin or "
+            "/usr/local/cuda-*/bin. Install the full CUDA Toolkit from "
             "https://developer.nvidia.com/cuda-downloads. Harmless if you "
             "only intend to compile on CPU."
         )
-        print("[WARN] nvcc not on $PATH  (CUDA Toolkit may be missing)")
+        print("[WARN] nvcc not found")
 
     # (3) Sanity test — the authoritative check; gates the return value
     device = "cuda" if torch.cuda.is_available() else "cpu"
