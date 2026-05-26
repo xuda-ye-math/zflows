@@ -61,7 +61,8 @@ class Potential(nn.Module):
         keyword and can't be a method name.)
 
         Example:
-            def U_fn(x):
+            def U_fn(x: torch.Tensor) -> torch.Tensor:
+                # x: [N, D] -> U(x): [N]   (batched for efficiency)
                 return 0.5 * (x ** 2).sum(-1) + 2 * torch.cos(x[:, 0])
 
             U = Potential._from(U_fn)  # class
