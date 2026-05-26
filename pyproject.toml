@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zflows"
-version = "0.4.0"
+version = "0.5.0"
 description = "PyTorch normalizing flows for unconditional energy-based sampling. Strongly inspired by zuko."
 authors = [{ name = "Xuda" }]
 license = { text = "MIT" }
