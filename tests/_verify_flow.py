@@ -2,7 +2,7 @@
 
 """Verification script for every zflows.Flow subclass.
 
-Run from the repo root:  python -m tests._verify_flows
+Run from the repo root:  python -m tests._verify_flow
 
 Consolidates the earlier per-flow scripts (_verify_NSF_NCSF, _verify_CNF_RealNVP,
 _zeros, _CNF_interface) into one banner-separated harness. Sections:
