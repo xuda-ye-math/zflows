@@ -1,6 +1,8 @@
-# Hidden files (except .gitignore)
+# Hidden files (except .gitignore and .github/)
 .*
 !.gitignore
+!.github
+!.github/**
 
 # This bootstrap script
 git_init.sh
