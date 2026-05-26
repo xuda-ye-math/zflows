@@ -7,6 +7,7 @@ Public API:
     NSF               — Neural Spline Flow on [a, b]^d (translation-sandwiched RQS)
     NCSF              — Neural Circular Spline Flow on [a, b]^d (periodic per coord)
     CNF               — Continuous Normalizing Flow on R^d (FFJORD)
+    OTFlow            — Optimal-transport continuous flow on R^d (closed-form trace)
     RealNVP           — affine-coupling flow on R^d
     ComposedTransform — re-exported from .core.transforms
 
@@ -29,6 +30,7 @@ from .core.flows import (
     GeneralCouplingTransform,
     LinearMixingTransform,
     MaskedAutoregressiveTransform,
+    OTFlowLazy,
 )
 from .core.transforms import (
     AdditiveTransform,
@@ -276,13 +278,18 @@ class CNF(Flow):
     `exact=False` to switch to a Hutchinson stochastic estimate (faster,
     biased gradients during training).
 
+    Integration is fixed-step RK4 (the only integrator in zflows): a
+    deterministic flop budget and a torch.compile-friendly loop, unrolled
+    under autograd so no adjoint bookkeeping is needed. Accuracy is set by
+    `nt` rather than solver tolerances; round-trip and log-det error fall
+    ~16x per doubling of `nt`.
+
     Arguments:
         dimension: number of features d.
         frequency: number of time-embedding frequencies in the ODE drift
             (recommend: 3-6).
-        absolute_tolerance: absolute tolerance of the adaptive ODE solver
-            (recommend: 1e-7 to 1e-5).
-        relative_tolerance: relative tolerance (recommend: 1e-6 to 1e-4).
+        nt: number of fixed RK4 steps (recommend: 8-24; raise for tighter
+            inverse round-trip / log-det accuracy at linear cost).
         exact: if True, evaluate log|det J| exactly via the augmented ODE.
             If False, use the Hutchinson trace estimator.
         hidden_features: ODE-MLP layer widths (recommend: (64, 64)).
@@ -292,18 +299,16 @@ class CNF(Flow):
         self,
         dimension: int,
         frequency: int = 3,
-        absolute_tolerance: float = 1e-6,
-        relative_tolerance: float = 1e-5,
+        nt: int = 16,
         exact: bool = True,
         hidden_features: tuple[int, ...] = (64, 64),
         activation: type[nn.Module] = nn.SiLU,
     ) -> None:
         super().__init__()
         self._ffj = FFJTransform(
-            features=dimension,
-            freqs=frequency,
-            atol=absolute_tolerance,
-            rtol=relative_tolerance,
+            dimension=dimension,
+            frequency=frequency,
+            nt=nt,
             exact=exact,
             hidden_features=hidden_features,
             activation=activation,
@@ -318,6 +323,85 @@ class CNF(Flow):
         last = self._ffj.ode[-1]
         nn.init.zeros_(last.weight)
         nn.init.zeros_(last.bias)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# OTFlow — optimal-transport continuous flow on R^d
+# ──────────────────────────────────────────────────────────────────────
+
+class OTFlow(Flow):
+    """Optimal-transport continuous normalizing flow (OT-Flow).
+
+    Reference:
+        Onken, Fung, Li, Ruthotto. "OT-Flow: Fast and Accurate Continuous
+        Normalizing Flows via Optimal Transport." AAAI 2021.
+        https://arxiv.org/abs/2006.00104
+
+    An upgraded `CNF`: a bijection on R^d defined by the ODE
+    `dx/dt = -∇_x Φ_θ(t, x)` for a learnable scalar potential `Φ_θ`. Because
+    `Φ_θ` has the OT-Flow antiderivative-of-tanh ResNet plus low-rank
+    quadratic structure, the divergence `tr(∇_x v) = -tr(∇²_x Φ)` is computed
+    in closed form (O(d·m)) — no Hutchinson estimator and no augmented O(d)
+    Jacobian ODE as in FFJORD, which is where OT-Flow's speedup comes from.
+    Integration uses a fixed-step RK4 scheme (deterministic flop budget,
+    torch.compile-friendly).
+
+    The forward map and `log|det J|` follow the standard `(y, ladj)` contract,
+    so an `OTFlow` is a drop-in `Flow` for `reverse_KL` / `compile_raw` and the
+    SMC utilities. The two extra optimal-transport diagnostics — the transport
+    cost `∫½|∇Φ|² dt` and the HJB residual `∫|½|∇Φ|² - ∂_tΦ| dt` — are exposed
+    through `zflows.loss.OT_loss`, which integrates all four channels in one
+    pass; plain `reverse_KL` simply drops them.
+
+    Arguments:
+        dimension: number of features d.
+        hidden: hidden width m of Φ's ResNet (recommend: 32-128).
+        layer: number of ResNet layers nTh inside Φ; must be >= 2
+            (recommend: 2-5).
+        rank: rank of Φ's low-rank quadratic term, clamped to <= d + 1
+            (recommend: min(10, d + 1)).
+        nt: number of fixed RK4 steps. A well-regularised OT path needs few
+            (recommend: 4-12); more steps tighten the inverse round-trip and
+            log-det accuracy at linear cost.
+        time_bound: (t0, t1) integration interval (default (0.0, 1.0)).
+
+    Unlike the other flows, OTFlow takes no `activation` argument: the
+    closed-form Hessian trace is derived specifically for the
+    antiderivative-of-tanh activation, so it is not configurable.
+    """
+    def __init__(
+        self,
+        dimension: int,
+        hidden: int = 64,
+        layer: int = 3,
+        rank: int = 10,
+        nt: int = 8,
+        time_bound: tuple[float, float] = (0.0, 1.0),
+    ) -> None:
+        super().__init__()
+        self._ot = OTFlowLazy(
+            dimension=dimension,
+            hidden=hidden,
+            layer=layer,
+            rank=rank,
+            nt=nt,
+            time_bound=time_bound,
+        )
+
+    def t(self) -> ComposedTransform:
+        """Bijection on R^d as a length-1 ComposedTransform."""
+        return ComposedTransform(self._ot())
+
+    def zeros(self) -> None:
+        """Φ ≡ 0 → drift ∇Φ = 0 → identity bijection with ladj = 0.
+
+        Zeros every head of the potential: the ResNet output weight `w`, the
+        quadratic factor `A` (so AᵀA = 0), and the linear head `c`.
+        """
+        phi = self._ot.phi
+        nn.init.zeros_(phi.w.weight)
+        nn.init.zeros_(phi.A)
+        nn.init.zeros_(phi.c.weight)
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -51,6 +51,8 @@ Two things make this both **correct** and **fast**:
 
 The grid is fixed at the top of [`compare_compiled_loss.py`](compare_compiled_loss.py):
 
+<div align="center">
+
 | param          | value                                                                |
 |----------------|----------------------------------------------------------------------|
 | flow           | `NSF` with `bins=12, transforms=4, randmask=True`                    |
@@ -58,6 +60,8 @@ The grid is fixed at the top of [`compare_compiled_loss.py`](compare_compiled_lo
 | sweep          | `dimension` ∈ {2, 4, 8, 16, 32} × `hidden_features` ∈ {(64,64), (128,128), (256,256)} |
 | batch size     | 2000                                                                 |
 | timed steps    | 100, after 30 warmup steps to absorb compile + early-iteration retracing |
+
+</div>
 
 For each of the 15 `(d, hf)` cells, three modes are timed back-to-back: `raw`, `compiled-default`, and `compiled-reduce-overhead`. Each cell starts from a fresh `NSF` + `Adam` + (for compiled modes) a fresh `loss_fn` returned by `zflows.loss.compile_raw(...)`, then `del`'d and `torch.cuda.empty_cache()`d before the next cell to keep memory clean.
 
@@ -91,6 +95,8 @@ The CSV ([`compare_compiled_loss.csv`](compare_compiled_loss.csv)) is written in
 
 Reproduced from the committed [`compare_compiled_loss.csv`](compare_compiled_loss.csv):
 
+<div align="center">
+
 | $d$ | `hidden_features` | raw ms | default ms | reduce ms | speedup default | speedup reduce |
 |----:|:------------------|------:|----------:|---------:|--------------:|--------------:|
 |   2 | (64, 64)          |  5.99 |      1.40 |     0.52 |          4.28 |         11.60 |
@@ -108,6 +114,8 @@ Reproduced from the committed [`compare_compiled_loss.csv`](compare_compiled_los
 |  32 | (64, 64)          | 12.64 |      1.29 |     1.04 |          9.80 |         12.19 |
 |  32 | (128, 128)        | 12.33 |      1.43 |     1.21 |          8.63 |         10.19 |
 |  32 | (256, 256)        | 12.76 |      1.68 |     1.76 |          7.62 |          7.24 |
+
+</div>
 
 Three regularities to notice:
 

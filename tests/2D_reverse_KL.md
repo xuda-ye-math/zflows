@@ -2,8 +2,8 @@
 
 We train a Neural Spline Flow (NSF) $F$ such that the pushforward of a 2D Gaussian source $\mu_0$ approximates a target $\mu_1$ on $\mathbb R^2$ specified only by an unnormalized energy $U_1$.
 
-- **Source:** $\mu_0 = \mathcal N(0, I)$ on $\mathbb R^2$, with potential $U_0(x) = \tfrac{1}{2}|x|^2$.
-- **Target:** $\mu_1 \propto \exp(-U_1)$ with $U_1(x) = \tfrac{1}{2}|x|^2 + 2\cos x_1$.
+- **Source:** $\mu_0 = \mathcal N(0, I)$ on $\mathbb R^2$, with potential $U_0(x) = \frac{1}{2}|x|^2$.
+- **Target:** $\mu_1 \propto \exp(-U_1)$ with $U_1(x) = \frac{1}{2}|x|^2 + 2\cos x_1$.
 - **Flow:** $F$ is an NSF with bijection on the box $[-4, 4]^2 \subset \mathbb R^2$.
 
 ## Mathematical background

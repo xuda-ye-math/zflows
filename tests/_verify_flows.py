@@ -34,9 +34,9 @@ import torch._dynamo as dynamo
 
 from zflows.core.flows import LinearMixingTransform
 from zflows.core.transforms import FreeFormJacobianTransform, CircularShiftTransform
-from zflows.flow import NSF, NCSF, CNF, RealNVP, Flow, ComposedTransform
+from zflows.flow import NSF, NCSF, CNF, OTFlow, RealNVP, Flow, ComposedTransform
 import zflows.loss
-from zflows.loss import reverse_KL
+from zflows.loss import reverse_KL, OT_loss
 from zflows.potential import Gaussian
 from zflows.utils import suppress_warnings, set_cache_size_limit
 
@@ -94,6 +94,9 @@ print(f"  CNF d=2: {sum(p.numel() for p in cnf.parameters())} params")
 cnf_hutch = CNF(dimension=2, frequency=3, hidden_features=(32, 32), exact=False).to(device)
 print(f"  CNF d=2 (Hutchinson): {sum(p.numel() for p in cnf_hutch.parameters())} params")
 
+otf = OTFlow(dimension=2, hidden=32, layer=3, nt=8).to(device)
+print(f"  OTFlow d=2: {sum(p.numel() for p in otf.parameters())} params")
+
 # ─────────────────────────────────────────────────────────────────
 banner("2. Bijection round-trip")
 for name, flow, a, b in [
@@ -128,6 +131,20 @@ with torch.no_grad():
     x_back = F.inv(y)
 assert_close(x_back, x, atol=5e-4, name="CNF        F.inv(F(x)) ≈ x")
 
+# OTFlow — fixed-step RK4 inverse (backward integration). Round-trip error
+# is pure RK4 discretization (4th order: it falls ~16x per doubling of nt),
+# and an untrained xavier-initialised potential is stiff, so use a finer nt
+# here than the nt=8 default. This confirms the inverse direction is correct,
+# not just close.
+otf_rt = OTFlow(dimension=2, hidden=32, layer=3, nt=32).to(device)
+otf_rt.eval()
+x = torch.randn(64, 2) * 0.7
+with torch.no_grad():
+    F = otf_rt.t()
+    y = F(x)
+    x_back = F.inv(y)
+assert_close(x_back, x, atol=1e-3, name="OTFlow     F.inv(F(x)) ≈ x  (nt=32)")
+
 # ─────────────────────────────────────────────────────────────────
 banner("3. zeros() initialisation → identity bijection")
 for name, builder, sampler, atol_y, atol_l in [
@@ -151,6 +168,10 @@ for name, builder, sampler, atol_y, atol_l in [
      lambda: CNF(dimension=2, frequency=3, hidden_features=(32, 32)),
      lambda _: torch.randn(64, 2),
      1e-4, 1e-4),
+    ("OTFlow zeros",
+     lambda: OTFlow(dimension=2, hidden=32, layer=3, nt=8),
+     lambda _: torch.randn(64, 2),
+     1e-5, 1e-5),
 ]:
     flow = builder().to(device)
     flow.zeros()
@@ -170,8 +191,13 @@ nsf_asym  = NSF(a=[1.0, -2.0], b=[3.0, 2.0], bins=6, transforms=3).to(device)
 ncsf      = NCSF(a=[-pi, -pi], b=[pi, pi], bins=8, transforms=4).to(device)
 realnvp   = RealNVP(dimension=4, transforms=4, hidden_features=(32, 32)).to(device)
 cnf       = CNF(dimension=2, frequency=3, hidden_features=(32, 32)).to(device)
+# nt=32: the augmented-ODE ladj and the autograd slogdet of the discrete RK4
+# map agree only as nt grows (both are 4th-order accurate to the continuous
+# log-det); nt=8 leaves ~6e-2 discretization gap, nt=32 closes it to ~1e-4.
+otf       = OTFlow(dimension=2, hidden=32, layer=3, nt=32).to(device)
 realnvp.eval()
 cnf.eval()
+otf.eval()
 
 for name, flow, sample_fn, atol in [
     ("NSF",      nsf,      lambda f: f.a + (f.b - f.a) * torch.rand(5, f.a.size(0)),  1e-3),
@@ -179,6 +205,7 @@ for name, flow, sample_fn, atol in [
     ("NCSF",     ncsf,     lambda f: f.a + (f.b - f.a) * torch.rand(5, f.a.size(0)),  1e-3),
     ("RealNVP",  realnvp,  lambda _: torch.randn(5, 4),                               1e-4),
     ("CNF",      cnf,      lambda _: torch.randn(5, 2) * 0.5,                         5e-3),
+    ("OTFlow",   otf,      lambda _: torch.randn(5, 2) * 0.5,                         1e-3),
 ]:
     F = flow.t()
     x = sample_fn(flow)
@@ -395,6 +422,8 @@ for name, flow, x_factory in [
                 lambda: torch.randn(16, 4)),
     ("CNF",     CNF(dimension=2, frequency=3, hidden_features=(32, 32)).to(device),
                 lambda: torch.randn(16, 2) * 0.5),
+    ("OTFlow",  OTFlow(dimension=2, hidden=32, layer=3, nt=8).to(device),
+                lambda: torch.randn(16, 2) * 0.5),
 ]:
     flow.train()
     flow.zero_grad()
@@ -479,6 +508,53 @@ for b, l_c in zip(betas, losses):
         print(f"  FAIL: beta={b}: compiled={l_c}, raw={l_r}, diff={abs(l_c - l_r):.3e}")
         sys.exit(1)
 print(f"  [OK ] one compiled graph reused across {len(betas)} betas; outputs match raw reverse_KL")
+
+# --- 13c. OTFlow under compile_raw / compile_beta ---------------------
+# OTFlow's closed-form trace runs inside an RK4-unrolled ODE. This checks
+# the whole transform captures + compiles cleanly (no graph break on the
+# Hessian-trace, no per-beta recompile, gradients still flow).
+print()
+print("  13c. compile_raw / compile_beta on OTFlow (closed-form trace in RK4 ODE)")
+
+torch.manual_seed(0)
+otf_lc = OTFlow(dimension=2, hidden=32, layer=3, nt=6).to(device)
+F_ot = otf_lc.t()
+
+# 13c-i: compiled reverse_KL matches eager.
+raw_ot = zflows.loss.compile_raw(reverse_KL, u_lc, F_ot)
+l_c = raw_ot(x_lc).item()
+l_r = reverse_KL(x_lc, u_lc, F_ot).item()
+print(f"  compile_raw:  compiled={l_c:.6f}, eager={l_r:.6f}, diff={abs(l_c - l_r):.3e}")
+if abs(l_c - l_r) > 1e-3:
+    print("  FAIL: OTFlow compile_raw output drift")
+    sys.exit(1)
+
+# 13c-ii: compile_beta sweep adds no new graphs (the recompile bug).
+loss_ot = zflows.loss.compile_beta(reverse_KL, u_lc, F_ot)
+_ = loss_ot(x_lc, 0.1).item()  # warmup compile
+c0 = dynamo.utils.counters["stats"]["unique_graphs"]
+betas_ot = [0.2, 0.5, 1.0, 2.0, 3.0]
+losses_ot = [loss_ot(x_lc, b).item() for b in betas_ot]
+delta = dynamo.utils.counters["stats"]["unique_graphs"] - c0
+print(f"  compile_beta: unique_graphs delta across {len(betas_ot)} betas: {delta}  (expect 0)")
+if delta != 0:
+    print(f"  FAIL: OTFlow compile_beta recompiled {delta} time(s)")
+    sys.exit(1)
+for b, l_cb in zip(betas_ot, losses_ot):
+    if abs(l_cb - reverse_KL(x_lc, u_lc, F_ot, beta=b).item()) > 1e-3:
+        print(f"  FAIL: OTFlow compile_beta drift at beta={b}")
+        sys.exit(1)
+
+# 13c-iii: backprop through the compiled loss reaches every Phi parameter.
+otf_lc.zero_grad()
+raw_ot(x_lc).backward()
+n_params = sum(1 for _ in otf_lc.parameters())
+n_grads = sum(1 for p in otf_lc.parameters() if p.grad is not None)
+print(f"  backprop through compiled loss: {n_grads}/{n_params} params have grad")
+if n_grads != n_params:
+    print(f"  FAIL: OTFlow compiled-loss backprop missed {n_params - n_grads} params")
+    sys.exit(1)
+print("  [OK ] OTFlow compiles (no graph break / no per-beta recompile) and backprops")
 
 # ─────────────────────────────────────────────────────────────────
 banner("14. RealNVP with linear mixing (rotation / lu)")
@@ -581,7 +657,36 @@ if abs(ladj_after.item()) <= 1e-3:
 print("  [OK ] lu mixing layers produce a non-trivial log|det| after training")
 
 # ─────────────────────────────────────────────────────────────────
-banner("15. Captured F sees param updates (NSF, CNF)")
+banner("14g. OT_loss = reverse_KL + OT regularizers (OTFlow)")
+# OT_loss integrates the 4-channel augmented ODE (x, ladj, transport, HJB).
+# With alpha_C = alpha_R = 0 it must reduce exactly to reverse_KL on the same
+# flow; the regularizers are non-negative and additively decoupled.
+torch.manual_seed(7)
+otf_g = OTFlow(dimension=2, hidden=32, layer=3, nt=8).to(device)
+u_g = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0], device=device)
+x_g = torch.randn(64, 2, device=device)
+
+# decoupling: alpha_C = alpha_R = 0  ==  reverse_KL
+l_ot0 = OT_loss(x_g, u_g, otf_g, beta=1.0, alpha_C=0.0, alpha_R=0.0)
+l_rk = reverse_KL(x_g, u_g, otf_g.t())
+assert_close(l_ot0, l_rk, atol=1e-5,
+             name="14g  OT_loss(alpha_C=alpha_R=0) == reverse_KL")
+
+# transport / HJB channels are non-negative integrals
+F_g = otf_g.t().transforms[0]
+_, _, C_g, R_g = F_g.call_full(x_g)
+assert (C_g >= 0).all() and (R_g >= 0).all(), "OT cost channels must be >= 0"
+print(f"  transport cost C: mean={C_g.mean().item():.4f}, min={C_g.min().item():.3e} (>=0)")
+print(f"  HJB residual  R: mean={R_g.mean().item():.4f}, min={R_g.min().item():.3e} (>=0)")
+
+# full loss is finite and the regularizers actually move it
+l_ot_full = OT_loss(x_g, u_g, otf_g, beta=1.0, alpha_C=1.0, alpha_R=1.0)
+assert torch.isfinite(l_ot_full), "OT_loss returned non-finite"
+print(f"  OT_loss(full)={l_ot_full.item():.6f}, reverse_KL={l_rk.item():.6f}")
+print("  [OK ] OT_loss decouples to reverse_KL and adds non-negative OT regularizers")
+
+# ─────────────────────────────────────────────────────────────────
+banner("15. Captured F sees param updates (NSF, CNF, OTFlow)")
 # Same capture-once-then-mutate contract as §14f, but for NSF and CNF
 # rather than RealNVP's mixing layers. Catches any regression where a
 # subclass of Transform snapshots derived state in __init__ instead of
@@ -615,6 +720,23 @@ with torch.no_grad():
     y_fresh, ladj_fresh = flow_cnf.t().call_and_ladj(x15c)
 assert_close(y_cap,    y_fresh,    atol=1e-4, name="15b  CNF captured F sees param updates: y")
 assert_close(ladj_cap, ladj_fresh, atol=1e-4, name="15b  CNF captured F sees param updates: ladj")
+
+# OTFlow — OTFlowTransform holds a reference to OTPhi; the RK4 drift reads
+# its parameters via trHess on every step, so a captured transform must
+# track in-place updates. A snapshot of any Phi-derived tensor in __init__
+# would make y / ladj here stale.
+torch.manual_seed(102)
+flow_otf = OTFlow(dimension=3, hidden=16, layer=3, nt=8)
+F_otf = flow_otf.t()
+x15o = torch.randn(8, 3) * 0.5
+with torch.no_grad():
+    for p in flow_otf.parameters():
+        p.add_(0.05 * torch.randn_like(p))
+with torch.no_grad():
+    y_cap, ladj_cap = F_otf.call_and_ladj(x15o)
+    y_fresh, ladj_fresh = flow_otf.t().call_and_ladj(x15o)
+assert_close(y_cap,    y_fresh,    atol=1e-6, name="15c  OTFlow captured F sees param updates: y")
+assert_close(ladj_cap, ladj_fresh, atol=1e-6, name="15c  OTFlow captured F sees param updates: ladj")
 
 # ─────────────────────────────────────────────────────────────────
 print()

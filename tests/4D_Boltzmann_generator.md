@@ -2,7 +2,7 @@
 
 We sample from a 4-dimensional energy-based target via a *Boltzmann generator* — a normalizing flow trained against a sequence of bridge potentials that anneal from a tractable source to the physical target. This is the smallest non-trivial example that exhibits the hallmarks of real molecular Boltzmann-generator workloads: a continuous symmetry the flow has to discover, a hard repulsive barrier, and a particle-exchange symmetry.
 
-- **Source.** $\mu_0 = \mathcal N(0, I_4)$, with potential $U_0(x) = \tfrac{1}{2}|x|^2$.
+- **Source.** $\mu_0 = \mathcal N(0, I_4)$, with potential $U_0(x) = \frac{1}{2}|x|^2$.
 - **Target.** Two unit charges in $\mathbb R^2$, each soft-confined to a ring of radius $r_0=2$, with a regularized 3D Coulomb interaction:
 $$
 U_1(x_1, x_2) \;=\; a\bigl[\,(|x_1|^2 - r_0^2)^2 + (|x_2|^2 - r_0^2)^2\,\bigr] \;+\; \frac{q^2}{\sqrt{|x_1 - x_2|^2 + \varepsilon^2}}, \qquad x = (x_1, x_2) \in \mathbb R^4,
@@ -79,7 +79,7 @@ The figure below plots the validation particles at $k = 0, 4, 8, 12$ in two rows
 **Joint angular structure (row 2).** This is where the actual physics shows up.
 
 - At $k=0$ the polar histogram is essentially flat — particles are uncorrelated (i.i.d. 4D Gaussians factorize as two i.i.d. 2D Gaussians, whose angular difference is uniform on $S^1$). $|\Delta\theta|$ has mean $\pi/2$.
-- The $k=4$ histogram is still close to flat. At this rung the bridge $U_4 = \tfrac{2}{3} U_0 + \tfrac{1}{3} U_1$ has very weak Coulomb compared to the still-strong harmonic source, so repulsion barely shifts the angular density.
+- The $k=4$ histogram is still close to flat. At this rung the bridge $U_4 = \frac{2}{3} U_0 + \frac{1}{3} U_1$ has very weak Coulomb compared to the still-strong harmonic source, so repulsion barely shifts the angular density.
 - At $k=8$ the density becomes visibly anisotropic: the bars near $\Delta\theta = 0$ are slightly suppressed and a faint hump grows on the left. The bridge is now Coulomb-dominated.
 - At $k=12$ (pure target) the suppression at $\Delta\theta \approx 0$ is clear and a tall peak sits at $\Delta\theta = \pm\pi$ (left side of the polar plot). The width of the peak is set by the temperature ratio $q^2 / (a r_0^4) = 4/16 = 1/4$ — repulsion is strong enough to make the antipodal configuration the *dominant* one but not strong enough to lock it. We're in the warm-Wigner-crystal regime, exactly where Boltzmann generators are most useful (slow MCMC, multimodal target, no analytic samples).
 

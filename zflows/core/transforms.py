@@ -19,7 +19,7 @@ subclass) also pick it up.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from textwrap import indent
 from typing import Any
 
@@ -30,7 +30,7 @@ from torch.distributions import Transform, constraints
 from torch.distributions.transforms import *  # noqa: F401,F403
 from torch.distributions.utils import _sum_rightmost
 
-from .numerics import bisection, broadcast, odeint
+from .numerics import broadcast, rk4_fixed
 
 
 __all__ = [
@@ -567,6 +567,21 @@ class FreeFormJacobianTransform(Transform):
 
     `exact=True`  → exact log|det J| via O(d) augmented ODE.
     `exact=False` → Hutchinson trace estimator (stochastic, biased grads).
+
+    Integration is fixed-step RK4 (`rk4_fixed`), unrolled under the ambient
+    autograd tape: parameter gradients flow through the unrolled trajectory
+    directly, so there is no `phi` / adjoint plumbing and no `atol`/`rtol`.
+    The augmented `(x, ladj)` state is packed into one tensor (ladj as a
+    trailing column) so the same single-tensor `rk4_fixed` serves here and in
+    `OTFlowTransform`.
+
+    Arguments:
+        f:     drift `f(t, x)` returning `dx/dt` with the shape of `x`.
+        t0:    trajectory start time.
+        t1:    trajectory end time.
+        nt:    number of fixed RK4 steps.
+        exact: if True, the log-det uses the exact O(d) batched-Jacobian
+            trace; if False, a Hutchinson stochastic estimate.
     """
 
     domain = constraints.real_vector
@@ -578,9 +593,7 @@ class FreeFormJacobianTransform(Transform):
         f: Callable[[Tensor, Tensor], Tensor],
         t0: float | Tensor = 0.0,
         t1: float | Tensor = 1.0,
-        phi: Iterable[Tensor] = (),
-        atol: float = 1e-6,
-        rtol: float = 1e-5,
+        nt: int = 8,
         exact: bool = True,
         **kwargs,
     ) -> None:
@@ -588,14 +601,11 @@ class FreeFormJacobianTransform(Transform):
         self.f = f
         self.t0 = t0
         self.t1 = t1
-        self.phi = tuple(filter(lambda p: p.requires_grad, phi))
-        self.atol = atol
-        self.rtol = rtol
+        self.nt = nt
         self.exact = exact
-        self.trace_scale = 1e-2
 
     def _call(self, x: Tensor) -> Tensor:
-        return odeint(self.f, x, self.t0, self.t1, self.phi, self.atol, self.rtol)
+        return rk4_fixed(self.f, x, self.t0, self.t1, self.nt)
 
     @property
     def inv(self) -> Transform:
@@ -603,45 +613,47 @@ class FreeFormJacobianTransform(Transform):
             f=self.f,
             t0=self.t1,
             t1=self.t0,
-            phi=self.phi,
-            atol=self.atol,
-            rtol=self.rtol,
+            nt=self.nt,
             exact=self.exact,
         )
 
     def _inverse(self, y: Tensor) -> Tensor:
-        return odeint(self.f, y, self.t1, self.t0, self.phi, self.atol, self.rtol)
+        return rk4_fixed(self.f, y, self.t1, self.t0, self.nt)
 
     def log_abs_det_jacobian(self, x: Tensor, y: Tensor) -> Tensor:
         _, ladj = self.call_and_ladj(x)
         return ladj
 
     def call_and_ladj(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        create_graph = torch.is_grad_enabled() and (x.requires_grad or bool(self.phi))
+        d = x.shape[-1]
+        # Build the graph for the trace term iff we will backprop (training);
+        # under torch.no_grad() (eval) this is False and stays cheap.
+        create_graph = torch.is_grad_enabled()
 
         if self.exact:
-            I = torch.eye(x.shape[-1], dtype=x.dtype, device=x.device)
+            I = torch.eye(d, dtype=x.dtype, device=x.device)
             I = I.expand(*x.shape, -1).movedim(-1, 0)
         else:
             eps = torch.randn_like(x)
 
-        def f_aug(t: Tensor, x: Tensor, ladj: Tensor) -> Tensor:
+        def f_aug(t: Tensor, z: Tensor) -> Tensor:
+            xs = z[..., :d]
             with torch.enable_grad():
-                x = x.clone().requires_grad_()
-                dx = self.f(t, x)
+                xs = xs.clone().requires_grad_()
+                dx = self.f(t, xs)
             if self.exact:
                 jacobian = torch.autograd.grad(
-                    dx, x, I, create_graph=create_graph, is_grads_batched=True
+                    dx, xs, I, create_graph=create_graph, is_grads_batched=True
                 )[0]
                 trace = torch.einsum("i...i", jacobian)
             else:
-                epsjp = torch.autograd.grad(dx, x, eps, create_graph=create_graph)[0]
+                epsjp = torch.autograd.grad(dx, xs, eps, create_graph=create_graph)[0]
                 trace = (epsjp * eps).sum(dim=-1)
-            return dx, trace * self.trace_scale
+            return torch.cat([dx, trace.unsqueeze(-1)], dim=-1)
 
-        ladj = torch.zeros_like(x[..., 0])
-        y, ladj = odeint(f_aug, (x, ladj), self.t0, self.t1, self.phi, self.atol, self.rtol)
-        return y, ladj * (1 / self.trace_scale)
+        z0 = torch.cat([x, x.new_zeros(*x.shape[:-1], 1)], dim=-1)
+        zT = rk4_fixed(f_aug, z0, self.t0, self.t1, self.nt)
+        return zT[..., :d], zT[..., d]
 
 
 # ──────────────────────────────────────────────────────────────────────

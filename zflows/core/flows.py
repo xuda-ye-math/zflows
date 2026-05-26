@@ -28,6 +28,7 @@ from torch.distributions import Transform
 
 from .nn import MLP, MaskedMLP
 from .numerics import broadcast, unpack
+from .otflow import OTFlowTransform, OTPhi
 from .transforms import (
     AutoregressiveTransform,
     CircularShiftTransform,
@@ -48,6 +49,7 @@ __all__ = [
     "GeneralCouplingTransform",
     "LinearMixingTransform",
     "MaskedAutoregressiveTransform",
+    "OTFlowLazy",
 ]
 
 
@@ -204,16 +206,23 @@ class FFJTransform(nn.Module):
     """Lazy unconditional free-form-Jacobian transformation (FFJORD).
 
     Compared to zuko's version, drops `context` and the c-arg branch of
-    the drift `f(t, x)`. Time is embedded via 2 * freqs cos/sin
+    the drift `f(t, x)`. Time is embedded via 2 * frequency cos/sin
     components, concatenated with x as the ODE-MLP input.
+
+    Arguments:
+        dimension: number of features d.
+        frequency: number of time-embedding frequencies in the drift.
+        nt: number of fixed RK4 steps the transform integrates.
+        exact: exact O(d) trace if True, Hutchinson estimate if False.
+        hidden_features: ODE-MLP layer widths.
+        activation: ODE-MLP activation class.
     """
 
     def __init__(
         self,
-        features: int,
-        freqs: int = 3,
-        atol: float = 1e-6,
-        rtol: float = 1e-5,
+        dimension: int,
+        frequency: int = 3,
+        nt: int = 8,
         exact: bool = True,
         hidden_features: Sequence[int] = (64, 64),
         activation: type[nn.Module] = nn.ELU,
@@ -221,16 +230,15 @@ class FFJTransform(nn.Module):
         super().__init__()
 
         self.ode = MLP(
-            features + 2 * freqs,
-            features,
+            dimension + 2 * frequency,
+            dimension,
             hidden_features=hidden_features,
             activation=activation,
         )
         self.register_buffer("times", torch.tensor((0.0, 1.0)))
-        self.register_buffer("freqs", torch.arange(1, freqs + 1) * pi)
+        self.register_buffer("freqs", torch.arange(1, frequency + 1) * pi)
 
-        self.atol = atol
-        self.rtol = rtol
+        self.nt = nt
         self.exact = exact
 
     def f(self, t: Tensor, x: Tensor) -> Tensor:
@@ -240,18 +248,65 @@ class FFJTransform(nn.Module):
         return self.ode(x)
 
     def forward(self) -> Transform:
-        # Pass parameters as `phi` only while training so the ODE adjoint
-        # backprops through them; at eval time phi=() avoids the autograd
-        # graph machinery.
-        phi = tuple(self.parameters()) if self.training else ()
+        # The fixed-step RK4 integrator unrolls under autograd, so parameter
+        # gradients flow without any `phi` / adjoint bookkeeping; `f` reads the
+        # MLP parameters by attribute on every step (lazy capture-once).
         return FreeFormJacobianTransform(
             f=self.f,
             t0=self.times[0],
             t1=self.times[1],
-            phi=phi,
-            atol=self.atol,
-            rtol=self.rtol,
+            nt=self.nt,
             exact=self.exact,
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# OT-Flow continuous flow
+# ──────────────────────────────────────────────────────────────────────
+
+class OTFlowLazy(nn.Module):
+    """Lazy unconditional OT-Flow transformation.
+
+    The continuous-time counterpart of `FFJTransform`, but with the ODE
+    velocity field parameterised as the negative gradient of a scalar
+    potential `Φ_theta` (an `OTPhi`). `forward()` returns a fresh
+    `OTFlowTransform` that holds the potential by reference, so the lazy
+    re-read contract (a captured transform still sees `optimizer.step()`
+    updates) matches `FFJTransform`. Unlike FFJORD, the divergence is
+    closed-form, so no `exact` / Hutchinson flag is needed.
+
+    Arguments:
+        dimension:  spatial dimension d.
+        hidden:     hidden width of Φ's ResNet.
+        layer:      number of ResNet layers inside Φ (>= 2).
+        rank:       rank of Φ's quadratic term (clamped to <= dimension + 1).
+        nt:         number of fixed RK4 steps the transform integrates.
+        time_bound: (t0, t1) trajectory time bounds.
+    """
+
+    def __init__(
+        self,
+        dimension: int,
+        hidden: int = 64,
+        layer: int = 3,
+        rank: int = 10,
+        nt: int = 8,
+        time_bound: tuple[float, float] = (0.0, 1.0),
+    ) -> None:
+        super().__init__()
+        self.dimension = dimension
+        self.nt = nt
+        self.time_bound = time_bound
+        self.phi = OTPhi(dimension=dimension, hidden=hidden, layer=layer, rank=rank)
+
+    def forward(self) -> Transform:
+        t0, t1 = self.time_bound
+        return OTFlowTransform(
+            phi=self.phi,
+            dimension=self.dimension,
+            t0=t0,
+            t1=t1,
+            nt=self.nt,
         )
 
 

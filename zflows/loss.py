@@ -3,7 +3,7 @@
 from collections.abc import Callable
 
 import torch
-from .flow import ComposedTransform
+from .flow import ComposedTransform, OTFlow
 from .potential import Potential
 
 
@@ -80,6 +80,40 @@ def target_KL_G(y: torch.Tensor, source: Potential, G: ComposedTransform, beta: 
     """
     x, ladj = G.call_and_ladj(y) # x = G(y), ladj = log|det J_G(y)|
     return (beta * source(x) - ladj).mean()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# OT_loss — reverse KL + optimal-transport regularizers (OTFlow only)
+# ──────────────────────────────────────────────────────────────────────
+
+def OT_loss(x: torch.Tensor, target: Potential, otflow: OTFlow, beta: float = 1.0,
+            alpha_C: float = 1.0, alpha_R: float = 1.0):
+    """
+    Full OT-Flow training objective: reverse KL plus the two optimal-transport
+    regularizers. Specific to `zflows.flow.OTFlow` — it integrates the
+    4-channel augmented ODE (position, log-det, transport cost, HJB residual)
+    in a single pass via `OTFlowTransform.call_full`. Estimates
+        E_{x ~ source}[ beta * target(F(x)) - log|det J_F(x)|
+                        + alpha_C * C(x) + alpha_R * R(x) ],
+    where the first two terms are exactly `reverse_KL` (the energy-based
+    objective), C(x) = integral_0^1 (1/2)|grad Phi|^2 dt is the transport cost,
+    and R(x) = integral_0^1 |(1/2)|grad Phi|^2 - d_t Phi| dt is the HJB residual.
+    Setting alpha_C = alpha_R = 0 recovers `reverse_KL(x, target, otflow.t())`.
+    Input:
+        x:       Tensor [N, d]   samples drawn from the source distribution
+        target:  Potential       negative log-density of the target (up to const)
+        otflow:  OTFlow          the optimal-transport flow (passed as the flow
+                                 object, not its transform, so the augmented ODE
+                                 is reachable)
+        beta:    float           inverse temperature scaling the target (default 1.0)
+        alpha_C: float           weight on the transport-cost regularizer (default 1.0)
+        alpha_R: float           weight on the HJB-residual regularizer (default 1.0)
+    Output:
+        loss: Tensor (scalar)
+    """
+    F = otflow.t().transforms[0]            # the underlying OTFlowTransform
+    y, ladj, C, R = F.call_full(x)
+    return (beta * target(y) - ladj + alpha_C * C + alpha_R * R).mean()
 
 
 # ──────────────────────────────────────────────────────────────────────

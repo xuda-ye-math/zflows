@@ -27,3 +27,7 @@ __pycache__/
 
 # Local DB experiments
 DB_tests/
+
+# OT-Flow reference implementation + paper (downloaded for the OTFlow port; not part of the package)
+OT-Flow/
+arXiv-2006.00104v5.tar.gz

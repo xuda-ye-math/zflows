@@ -14,7 +14,7 @@ $$
 \mathcal L_{\mathrm{forward}}[F] = \mathbb E_{y \sim \mu_1} \bigl[\, U_0(F^{-1}(y)) + \log |\det J_F(F^{-1}(y))| \,\bigr],
 $$
 
-where $\mu_1$ is the empirical two-moons distribution and $U_0(x) = \tfrac{1}{2}|x|^2$ is the Gaussian source potential. Concretely the loop calls `forward_KL(y_batch, source=u0, F=flow.t())`, which evaluates $F^{-1}$ and $\log|\det J_{F^{-1}}|$ in one ODE integration via `flow.t().inv.call_and_ladj(y_batch)`.
+where $\mu_1$ is the empirical two-moons distribution and $U_0(x) = \frac{1}{2}|x|^2$ is the Gaussian source potential. Concretely the loop calls `forward_KL(y_batch, source=u0, F=flow.t())`, which evaluates $F^{-1}$ and $\log|\det J_{F^{-1}}|$ in one ODE integration via `flow.t().inv.call_and_ladj(y_batch)`.
 
 ### What is different about a CNF
 
@@ -30,9 +30,9 @@ $$
 \log |\det J_F(x)| = \int_0^1 \mathrm{tr}\bigl(\nabla_x v_\phi(x_t, t)\bigr)\, \mathrm{d}t,
 $$
 
-evaluated either *exactly* (an augmented ODE that costs $O(d)$ extra evaluations per step — `exact=True`, the default in `zflows.flow.CNF`) or via the *Hutchinson trace estimator* (one extra ODE channel, unbiased but stochastic — `exact=False`). The integration uses an adaptive `dopri5` solver (Dormand–Prince 5(4)) under the hood with the user-specified `atol` / `rtol`.
+evaluated either *exactly* (an augmented ODE that costs $O(d)$ extra evaluations per step — `exact=True`, the default in `zflows.flow.CNF`) or via the *Hutchinson trace estimator* (one extra ODE channel, unbiased but stochastic — `exact=False`). The integration uses a fixed-step RK4 solver under the hood with `nt` steps (`nt=16` by default), unrolled under autograd.
 
-The practical consequence is that *every* call to $F$ or $F^{-1}$ (forward sample, inverse sample, log-det) is one ODE integration with a data-dependent number of substeps — there is no closed-form alternative.
+The practical consequence is that *every* call to $F$ or $F^{-1}$ (forward sample, inverse sample, log-det) is one ODE integration with `nt` fixed RK4 substeps — there is no closed-form alternative.
 
 ## Implementation and execution
 
@@ -61,17 +61,21 @@ Pointers into the script:
 
 **CNF vs. NSF — a concrete comparison.** Both flow classes solve the same forward KL problem and expose the same `Flow` interface in `zflows`. The trade-off comes down to:
 
+<div align="center">
+
 | | `NSF` (autoregressive splines) | `CNF` (FFJORD) |
 |---|---|---|
-| Forward $F(x)$ | one MLP pass per spline transform, **closed-form** | one adaptive-ODE integration (typically 20–200 dopri5 substeps) |
+| Forward $F(x)$ | one MLP pass per spline transform, **closed-form** | one fixed-step RK4 integration (`nt` substeps) |
 | Inverse $F^{-1}(y)$ | bisection or analytic per coord, **closed-form O(d)** | same ODE integrated in reverse |
 | Log-det $\log\|\det J_F\|$ | sum of per-coord spline-derivative logs, **free** | augmented ODE channel (`exact=True`) or Hutchinson estimate |
 | Domain | rectangular box $[a, b]^d$, soft-extends outside | full $\mathbb R^d$ natively |
 | Smoothness of pushforward | $C^1$ at spline knots | $C^\infty$ in $x$ (smooth ODE flow) |
 | Topologically twisted targets | needs many stacked transforms | naturally handled in one flow |
-| Late-training wall-clock | constant per epoch | grows as drift sharpens (more solver substeps) |
+| Late-training wall-clock | constant per epoch | constant per epoch (fixed `nt` RK4 steps) |
 | Importance-sampling sweep | one closed-form pass over $N$ particles | one ODE integration per particle batch — **50–500× slower** |
-| MALA / Langevin rejuvenation | gradient autograds through MLPs | gradient routes through the adjoint ODE — costly |
+| MALA / Langevin rejuvenation | gradient autograds through MLPs | gradient unrolls through the fixed-step RK4 trajectory — costly |
+
+</div>
 
 **Implication for energy-based sampling.** Because reverse KL training, importance sampling, and MALA rejuvenation each require many forward / inverse / log-det evaluations per step, the *closed-form* nature of NSF makes it the right default for the *propose → reweight → resample → rejuvenate* pipeline that the other tests in this folder ([`2D_reverse_KL.md`](2D_reverse_KL.md), [`3D_periodic.md`](3D_periodic.md), [`4D_Boltzmann_generator.md`](4D_Boltzmann_generator.md)) all use. CNFs become competitive when
 
