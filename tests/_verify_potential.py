@@ -227,6 +227,30 @@ ulc.release()
 u0.release()
 u1.release()
 
+# B.3 — Linear_Combination rejects requires_grad=True tensor coeffs.
+# Buffer-registered coeffs are hidden from `optimizer.parameters()`; if the
+# user passes a tensor with grad tracking on, the optimizer would silently
+# never see the weights. The constructor must catch this up front.
+section("B.3  Linear_Combination guards against requires_grad=True coeffs")
+u_a = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0], device=device)
+u_b = Gaussian(mean=[3.0, 3.0], variance=[1.0, 1.0], device=device)
+# (1) plain tensor with requires_grad=False is accepted (existing behavior).
+lc_ok = Linear_Combination([u_a, u_b], torch.tensor([0.3, 0.7], device=device))
+assert lc_ok.coeffs.requires_grad is False, "buffer coeffs should not track grad"
+# (2) requires_grad=True tensor must raise.
+raised = False
+try:
+    Linear_Combination([u_a, u_b], torch.tensor([0.3, 0.7], device=device, requires_grad=True))
+except AssertionError as e:
+    raised = True
+    msg = str(e)
+assert raised, "Linear_Combination should reject requires_grad=True coeffs"
+assert "requires" in msg.lower() or "grad" in msg.lower(), \
+    f"rejection message should mention grad / requires_grad, got: {msg}"
+print(f"  plain tensor accepted:               coeffs.requires_grad = False")
+print(f"  requires_grad=True tensor rejected:  {msg.splitlines()[0][:80]}...")
+print("  [OK ] grad-tracking coeffs caught at construction")
+
 
 # ══════════════════════════════════════════════════════════════════
 # C. Gaussian.samples(N, beta=...)

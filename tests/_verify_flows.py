@@ -656,6 +656,29 @@ if abs(ladj_after.item()) <= 1e-3:
     sys.exit(1)
 print("  [OK ] lu mixing layers produce a non-trivial log|det| after training")
 
+# 14h — LULinearTransform near-singular safety: with |diag(L)| driven well
+# below the internal clamp floor (1e-12), call_and_ladj must still return
+# a finite log|det| (large negative, not -inf) instead of blowing the loss
+# to NaN. Healthy LU (== I) still produces ladj exactly 0.
+print()
+print("  --- 14h  LULinearTransform near-singular |diag(L)| ladj stays finite ---")
+from zflows.core.transforms import LULinearTransform
+x14h = torch.randn(8, 4, device=device)
+# (1) healthy LU = I -> ladj == 0
+t_h = LULinearTransform(torch.eye(4, device=device))
+_, ladj_h = t_h.call_and_ladj(x14h)
+assert ladj_h.abs().max().item() == 0.0, f"healthy LU ladj should be 0, got {ladj_h.max().item()}"
+# (2) near-singular LU: diagonal entry set far below clamp floor
+LU_bad = torch.eye(4, device=device).clone()
+LU_bad[2, 2] = 1e-20
+t_bad = LULinearTransform(LU_bad)
+y_bad, ladj_bad = t_bad.call_and_ladj(x14h)
+assert torch.isfinite(ladj_bad).all().item(), f"near-singular ladj should be finite, got {ladj_bad}"
+assert torch.isfinite(y_bad).all().item(), f"near-singular y should be finite, got {y_bad}"
+print(f"  healthy LU ladj:           {ladj_h.max().item():.4e}  (expect 0)")
+print(f"  near-singular LU ladj:     {ladj_bad.min().item():.4e}  (large -ve, finite)")
+print(f"  [OK ] LULinearTransform clamp keeps ladj / y finite when diag(L) -> 0")
+
 # ─────────────────────────────────────────────────────────────────
 banner("14g. OT_loss = reverse_KL + OT regularizers (OTFlow)")
 # OT_loss integrates the 4-channel augmented ODE (x, ladj, transport, HJB).

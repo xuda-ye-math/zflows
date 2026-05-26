@@ -395,9 +395,9 @@ class Linear_Combination(Potential):
         with the potentials — that's the redundancy that keeps a stray
         `.to('cuda')` from leaving the coeffs on CPU and tripping a
         device-mismatch error on the next forward. Mutate in place via
-        `self.coeffs[k] = new_value` or `self.coeffs.fill_(...)`; do NOT
-        reassign `self.coeffs = ...` (that would shadow the buffer with
-        a plain attribute and undo the device tracking).
+        `self.coeffs[k] = new_value` or `self.coeffs.fill_(...)` —
+        modern PyTorch refuses any reassignment `self.coeffs = ...`
+        with a clear `TypeError`, so the buffer registration is safe.
 
     A device-resident tensor also avoids the Dynamo Python-float
     specialization that would otherwise re-trace the compiled graph on
@@ -425,6 +425,18 @@ class Linear_Combination(Potential):
         if isinstance(coeffs, torch.Tensor):
             assert coeffs.ndim == 1, \
                 f"Tensor coeffs must be 1-d, got shape {tuple(coeffs.shape)}"
+            # Coeffs are mixture / interpolation weights, not learnable
+            # parameters. Registering a requires_grad=True tensor as a
+            # buffer would silently hide it from `optimizer.parameters()`
+            # while still accumulating `.grad` — a confusing footgun.
+            # Reject it explicitly; users who want a trainable mixture
+            # should subclass Linear_Combination and register a real
+            # nn.Parameter themselves.
+            assert not coeffs.requires_grad, (
+                "Linear_Combination coeffs are stored as a buffer and must not "
+                "require gradients; pass `coeffs.detach()` or build the tensor "
+                "without `requires_grad=True`."
+            )
             # Register as a buffer so .to(device) / .cuda() / .float() etc.
             # move the coeffs in lock-step with the potentials' parameters
             # and buffers. Without this, a tensor stored as a plain attribute

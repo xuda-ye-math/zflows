@@ -723,6 +723,18 @@ class LULinearTransform(Transform):
     are picked up on the next forward; same lazy-read contract as
     `RotationTransform`.
 
+    Numerical safety: `log|det| = sum log|diag(L)|` diverges to `-inf`
+    if any diagonal entry crosses zero during training (nothing in the
+    parameterisation keeps `diag(L)` away from the origin). The log is
+    therefore computed on `|diag|` clamped to a small floor `_LADJ_EPS`,
+    so a near-singular `L` produces a large-but-finite negative ladj
+    with a saturated zero gradient on the affected entries — preventing
+    the loss from exploding to NaN. For a principled fix that also
+    yields well-conditioned gradients near zero, re-parameterise the
+    diagonal as `sign(s0) * exp(log_s)` (Glow-style) — that would
+    change the `state_dict` layout and is deferred to a future major
+    release.
+
     Arguments:
         LU: matrix whose lower / upper triangular parts hold the non-zero
             elements of `L` and `U`, with shape `(*, D, D)`.
@@ -731,6 +743,12 @@ class LULinearTransform(Transform):
     domain = constraints.real_vector
     codomain = constraints.real_vector
     bijective = True
+
+    # Floor for |diag(L)| inside the log to avoid -inf / NaN ladj when the
+    # learnable LU diagonal crosses zero. log(1e-12) ≈ -27.6, so the
+    # per-entry penalty stays large but finite; gradient w.r.t. the
+    # diagonal saturates to 0 in the clamped region.
+    _LADJ_EPS = 1e-12
 
     def __init__(self, LU: Tensor, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -763,7 +781,7 @@ class LULinearTransform(Transform):
 
     def log_abs_det_jacobian(self, x: Tensor, y: Tensor) -> Tensor:
         diag = torch.diagonal(self.L, dim1=-1, dim2=-2)
-        ladj = diag.abs().log().sum(dim=-1)
+        ladj = diag.abs().clamp_min(self._LADJ_EPS).log().sum(dim=-1)
         return ladj.expand_as(x[..., 0])
 
     def call_and_ladj(self, x: Tensor) -> tuple[Tensor, Tensor]:
@@ -774,5 +792,5 @@ class LULinearTransform(Transform):
         U = torch.triu(self.LU, diagonal=1) + I
         y = torch.einsum("...ij,...j->...i", L @ U, x)
         diag = torch.diagonal(L, dim1=-1, dim2=-2)
-        ladj = diag.abs().log().sum(dim=-1).expand_as(x[..., 0])
+        ladj = diag.abs().clamp_min(self._LADJ_EPS).log().sum(dim=-1).expand_as(x[..., 0])
         return y, ladj
