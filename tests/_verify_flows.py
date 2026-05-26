@@ -32,6 +32,7 @@ from math import pi
 import torch
 import torch._dynamo as dynamo
 
+from zflows.core.flows import LinearMixingTransform
 from zflows.core.transforms import FreeFormJacobianTransform, CircularShiftTransform
 from zflows.flow import NSF, NCSF, CNF, RealNVP, Flow, ComposedTransform
 import zflows.loss
@@ -85,7 +86,7 @@ print(f"  NCSF d=3: {sum(p.numel() for p in ncsf.parameters())} params")
 
 realnvp = RealNVP(dimension=4, transforms=4, hidden_features=(32, 32)).to(device)
 print(f"  RealNVP d=4: {sum(p.numel() for p in realnvp.parameters())} params, "
-      f"{len(realnvp._coupling)} coupling layers")
+      f"{len(realnvp._layers)} layers")
 
 cnf = CNF(dimension=2, frequency=3, hidden_features=(32, 32)).to(device)
 print(f"  CNF d=2: {sum(p.numel() for p in cnf.parameters())} params")
@@ -478,6 +479,88 @@ for b, l_c in zip(betas, losses):
         print(f"  FAIL: beta={b}: compiled={l_c}, raw={l_r}, diff={abs(l_c - l_r):.3e}")
         sys.exit(1)
 print(f"  [OK ] one compiled graph reused across {len(betas)} betas; outputs match raw reverse_KL")
+
+# ─────────────────────────────────────────────────────────────────
+banner("14. RealNVP with linear mixing (rotation / lu)")
+
+for kind in ("rotation", "lu"):
+    print()
+    print(f"  --- mixing={kind!r} ---")
+
+    # 14a — round-trip
+    torch.manual_seed(0)
+    flow_mix = RealNVP(dimension=4, transforms=4, mixing=kind, hidden_features=(32, 32)).to(device)
+    flow_mix.eval()
+    x_mix = torch.randn(256, 4, device=device)
+    with torch.no_grad():
+        F_mix = flow_mix.t()
+        y_mix = F_mix(x_mix)
+        x_back = F_mix.inv(y_mix)
+    assert_close(x_back, x_mix, atol=1e-5, name=f"14a  F.inv(F(x)) ≈ x   (mixing={kind})")
+
+    # 14b — .zeros() → identity
+    flow_mix.zeros()
+    with torch.no_grad():
+        F_mix = flow_mix.t()
+        y_mix, ladj_mix = F_mix.call_and_ladj(x_mix)
+    assert_close(y_mix, x_mix, atol=1e-5, name=f"14b  zeros(): y ≈ x    (mixing={kind})")
+    assert_close(ladj_mix, torch.zeros_like(ladj_mix), atol=1e-5, name=f"14b  zeros(): ladj ≈ 0 (mixing={kind})")
+
+    # 14c — call_and_ladj matches autograd slogdet on a fresh, non-identity flow
+    torch.manual_seed(1)
+    flow_mix = RealNVP(dimension=4, transforms=4, mixing=kind, hidden_features=(32, 32)).to(device)
+    # nudge mixing weights so log|det| is non-trivial (especially for lu)
+    for layer in flow_mix._layers:
+        if isinstance(layer, LinearMixingTransform):
+            with torch.no_grad():
+                layer.weight.add_(0.1 * torch.randn_like(layer.weight))
+    flow_mix.train()
+    F_mix = flow_mix.t()
+    x1 = torch.randn(1, 4, device=device)
+    with torch.no_grad():
+        _, ladj_mix = F_mix.call_and_ladj(x1)
+    expected = exact_log_abs_det_jacobian(F_mix, x1)
+    assert_close(ladj_mix.squeeze(), expected, atol=1e-4, name=f"14c  call_and_ladj ≈ slogdet (mixing={kind})")
+
+    # 14d — every parameter receives a gradient
+    flow_mix.zero_grad()
+    x_b = torch.randn(16, 4, device=device)
+    y_b, ladj_b = flow_mix.t().call_and_ladj(x_b)
+    (y_b.pow(2).sum() - ladj_b.sum()).backward()
+    n_params = sum(1 for _ in flow_mix.parameters())
+    n_grads = sum(1 for p in flow_mix.parameters() if p.grad is not None)
+    print(f"  14d  {n_grads}/{n_params} parameter tensors have non-None grad   (mixing={kind})")
+    if n_grads != n_params:
+        print(f"  FAIL: mixing={kind}: missing grads on {n_params - n_grads} params")
+        sys.exit(1)
+
+# 14e — lu mixing: after one optimizer step weights diverge from I and ladj is non-zero
+print()
+print("  --- 14e  lu mixing contributes a non-trivial log|det| after one Adam step ---")
+torch.manual_seed(42)
+flow_lu = RealNVP(dimension=4, transforms=4, mixing="lu", hidden_features=(32, 32)).to(device)
+mixing_layers = [layer for layer in flow_lu._layers if isinstance(layer, LinearMixingTransform)]
+print(f"  built {len(mixing_layers)} lu mixing layers (expected 3 = transforms-1)")
+opt = torch.optim.Adam(flow_lu.parameters(), lr=0.1)
+x_b = torch.randn(64, 4, device=device)
+y_b, ladj_b = flow_lu.t().call_and_ladj(x_b)
+# per-sample reverse-KL-style loss: 0.5 * ||y||^2 - ladj
+loss_b = (0.5 * y_b.pow(2).sum(-1) - ladj_b).mean()
+opt.zero_grad(); loss_b.backward(); opt.step()
+I_d = torch.eye(4, device=device)
+max_drift = max((layer.weight - I_d).abs().max().item() for layer in mixing_layers)
+x2 = torch.randn(1, 4, device=device)
+with torch.no_grad():
+    _, ladj_after = flow_lu.t().call_and_ladj(x2)
+print(f"  max |LU.weight - I| after step = {max_drift:.3e}")
+print(f"  total flow ladj on test point   = {ladj_after.item():.3e}")
+if max_drift <= 1e-3:
+    print(f"  FAIL: LU weights did not move from identity (drift={max_drift})")
+    sys.exit(1)
+if abs(ladj_after.item()) <= 1e-3:
+    print(f"  FAIL: LU log|det| stayed near zero ({ladj_after.item()})")
+    sys.exit(1)
+print("  [OK ] lu mixing layers produce a non-trivial log|det| after training")
 
 # ─────────────────────────────────────────────────────────────────
 print()

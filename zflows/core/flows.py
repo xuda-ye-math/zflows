@@ -35,8 +35,10 @@ from .transforms import (
     CouplingTransform,
     DependentTransform,
     FreeFormJacobianTransform,
+    LULinearTransform,
     MonotonicAffineTransform,
     MonotonicRQSTransform,
+    RotationTransform,
 )
 
 
@@ -44,6 +46,7 @@ __all__ = [
     "CircularRQSTransform",
     "FFJTransform",
     "GeneralCouplingTransform",
+    "LinearMixingTransform",
     "MaskedAutoregressiveTransform",
 ]
 
@@ -262,3 +265,57 @@ def CircularRQSTransform(
         CircularShiftTransform(bound=bound),
         MonotonicRQSTransform(*phi, bound=bound, slope=slope),
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# LinearMixingTransform — lazy 1x1 invertible "conv" for RealNVP / Glow
+# ──────────────────────────────────────────────────────────────────────
+
+class LinearMixingTransform(nn.Module):
+    """Lazy unconditional linear mixing on R^d.
+
+    The Glow-style 1x1 invertible "convolution" used to interleave
+    cross-coordinate mixing between coupling layers. Two parametric
+    families are supported:
+
+      - kind="rotation": orthogonal map R = exp(A - A^T) of the
+        skew-symmetric part of a free d x d matrix; log|det| ≡ 0.
+      - kind="lu":       PLU-style map L @ U with L lower-triangular
+        (diagonal carries the log|det|) and U strict-upper-triangular
+        plus identity (unit diagonal).
+
+    Initialised at identity (rotation: A = 0 -> R = exp(0) = I;
+    lu: LU = I -> L = I, U = I) so that the layer contributes nothing
+    at construction time. Training moves the matrix away from identity
+    through normal gradients; calling .zeros() returns it to identity.
+    """
+
+    def __init__(self, features: int, kind: str = "rotation") -> None:
+        super().__init__()
+        assert kind in ("rotation", "lu"), f"unknown mixing kind {kind!r}"
+        self.kind = kind
+        self.features = features
+        if kind == "rotation":
+            self.weight = nn.Parameter(torch.zeros(features, features))
+        else:  # "lu"
+            self.weight = nn.Parameter(torch.eye(features))
+
+    def extra_repr(self) -> str:
+        return f"features={self.features}, kind={self.kind!r}"
+
+    def forward(self) -> Transform:
+        if self.kind == "rotation":
+            return RotationTransform(self.weight)
+        return LULinearTransform(self.weight)
+
+    def zeros(self) -> None:
+        """Reset to identity (A = 0 or LU = I)."""
+        with torch.no_grad():
+            if self.kind == "rotation":
+                self.weight.zero_()
+            else:
+                self.weight.copy_(torch.eye(
+                    self.features,
+                    device=self.weight.device,
+                    dtype=self.weight.dtype,
+                ))

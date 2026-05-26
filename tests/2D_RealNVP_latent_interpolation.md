@@ -6,7 +6,8 @@ The point is not that RealNVP is the best density estimator on this target — `
 
 - **Source.** $\mu_0 = \mathcal N(0, I_2)$, the standard 2D Gaussian on $\mathbb R^2$. RealNVP lives natively on the unbounded plane, so there is no rectangular box to specify.
 - **Target.** A 4-mode Gaussian mixture with means $(\pm 2, \pm 2)$ and shared variance $0.15$ — symmetric, well-separated, and visually distinct enough that interpolation paths between the modes can be tracked by eye.
-- **Flow.** A `RealNVP` with `transforms=8` stacked affine-coupling layers (bumped from the default 4 because each affine coupling is a much weaker bijection than an NSF spline transform, and the 4-mode target needs the extra capacity) and a `(64, 64)` MLP per layer.
+- **Flow.** A `RealNVP` with `transforms=8` stacked affine-coupling layers (bumped from the default 4 because each affine coupling is a much weaker bijection than an NSF spline transform, and the 4-mode target needs the extra capacity), a `(64, 64)` MLP per layer, and `mixing="lu"` — a learnable PLU mixing matrix inserted between every two couplings (7 mixing layers total at `transforms=8`).
+  - At $d = 2$ the practical effect of the mixing layers is small (the demo runs equally well with `mixing=None`), but the option is shown here to flag the recommended pattern for higher-dimensional targets. **Rule of thumb:** keep the default `mixing=None` at $d \le 4$ where the random checkered mask already shuffles most coordinate pairs; switch to `mixing="lu"` (or `mixing="rotation"` if you want a strictly volume-preserving mixing) when $d \gtrsim 8$ so that cross-coordinate communication does not have to wait for the slow mask-rotation schedule.
 
 ## Mathematical background
 

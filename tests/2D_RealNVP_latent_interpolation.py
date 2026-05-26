@@ -37,7 +37,7 @@ u1 = Gaussian_Mixture(
 
 # initialize RealNVP with extra coupling layers (each affine layer is
 # weaker than an NSF spline transform, so 4 modes need extra capacity)
-flow = RealNVP(dimension=2, transforms=8, hidden_features=(64, 64)).to(device)
+flow = RealNVP(dimension=2, transforms=8, mixing="lu", hidden_features=(64, 64)).to(device)
 
 # training parameters
 N: int = 10000 # number of samples

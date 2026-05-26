@@ -27,6 +27,7 @@ from .core.flows import (
     CircularRQSTransform,
     FFJTransform,
     GeneralCouplingTransform,
+    LinearMixingTransform,
     MaskedAutoregressiveTransform,
 )
 from .core.transforms import (
@@ -327,7 +328,10 @@ class RealNVP(Flow):
     """Affine-coupling normalizing flow (RealNVP, Dinh et al. 2016).
 
     N stacked coupling transforms with checkered (or random) feature
-    masks; inverse and log|det J| are closed-form O(d).
+    masks; inverse and log|det J| are closed-form O(d). Optionally
+    interleaves a learnable d x d linear mixing layer between every
+    pair of consecutive couplings — the same idea as Glow's
+    "invertible 1x1 convolution" on R^d.
 
     Arguments:
         dimension: number of features d.
@@ -336,6 +340,15 @@ class RealNVP(Flow):
             mask per layer (better mixing at d >= 4). If False, use the
             canonical alternating-checkered RealNVP masks. Reproducible
             from a global torch seed in either case.
+        mixing: one of None | "rotation" | "lu".
+            If None (default), no mixing layer is inserted and the
+            flow is a pure stack of coupling transforms. If "rotation",
+            an orthogonal `R = exp(A - A^T)` map (log|det| ≡ 0) is
+            inserted between every two consecutive couplings (i.e.
+            `transforms - 1` mixing layers total). If "lu", a PLU map
+            `L @ U` is inserted instead — its learnable diagonal of `L`
+            provides a non-trivial log|det| that supplements the
+            coupling layers. Mixing layers are initialised at identity.
         hidden_features: per-layer widths of the coupling-conditioner MLP
             (recommend: (64, 64) or (128, 128)).
         activation: conditioner MLP activation class (recommend: nn.SiLU).
@@ -345,17 +358,18 @@ class RealNVP(Flow):
         dimension: int,
         transforms: int = 4,
         randmask: bool = True,
+        mixing: str | None = None,
         hidden_features: tuple[int, ...] = (64, 64),
         activation: type[nn.Module] = nn.SiLU,
     ) -> None:
         super().__init__()
-        self._coupling = nn.ModuleList()
+        self._layers = nn.ModuleList()
         for i in range(transforms):
             if randmask:
                 mask = torch.randperm(dimension) % 2 == i % 2
             else:
                 mask = torch.arange(dimension) % 2 == i % 2
-            self._coupling.append(
+            self._layers.append(
                 GeneralCouplingTransform(
                     features=dimension,
                     mask=mask,
@@ -363,14 +377,26 @@ class RealNVP(Flow):
                     activation=activation,
                 )
             )
+            # Insert a mixing layer between this coupling and the next
+            # (skip after the last coupling — no successor to mix into).
+            if mixing is not None and i < transforms - 1:
+                self._layers.append(
+                    LinearMixingTransform(features=dimension, kind=mixing)
+                )
 
     def t(self) -> ComposedTransform:
-        """Bijection on R^d as the composition of all coupling transforms."""
-        return ComposedTransform(*[c() for c in self._coupling])
+        """Bijection on R^d as the composition of all coupling (and mixing) layers."""
+        return ComposedTransform(*[layer() for layer in self._layers])
 
     def zeros(self) -> None:
-        """Zeroing the last conditioner layer → identity per coupling layer."""
-        for c in self._coupling:
-            last = c.hyper[-1]
-            nn.init.zeros_(last.weight)
-            nn.init.zeros_(last.bias)
+        """Reset each layer to identity:
+           - coupling: zero the last conditioner layer's weight/bias;
+           - mixing:   delegate to LinearMixingTransform.zeros() (A=0 / LU=I).
+        """
+        for layer in self._layers:
+            if isinstance(layer, LinearMixingTransform):
+                layer.zeros()
+            else:
+                last = layer.hyper[-1]
+                nn.init.zeros_(last.weight)
+                nn.init.zeros_(last.bias)

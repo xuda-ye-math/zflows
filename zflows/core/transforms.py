@@ -42,8 +42,10 @@ __all__ = [
     "DependentTransform",
     "FreeFormJacobianTransform",
     "IdentityTransform",
+    "LULinearTransform",
     "MonotonicAffineTransform",
     "MonotonicRQSTransform",
+    "RotationTransform",
 ]
 
 
@@ -640,3 +642,81 @@ class FreeFormJacobianTransform(Transform):
         ladj = torch.zeros_like(x[..., 0])
         y, ladj = odeint(f_aug, (x, ladj), self.t0, self.t1, self.phi, self.atol, self.rtol)
         return y, ladj * (1 / self.trace_scale)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Linear mixing transforms on R^d (Glow-style 1x1 invertible "conv")
+# ──────────────────────────────────────────────────────────────────────
+
+class RotationTransform(Transform):
+    r"""Rotation `f(x) = R x` with `R = exp(A - A^T)` orthogonal.
+
+    Because `A - A^T` is skew-symmetric, the matrix exponential is
+    orthogonal, so the transform is volume-preserving and its
+    log-abs-determinant is identically zero.
+
+    Arguments:
+        A: square matrix `A`, with shape `(*, D, D)`.
+    """
+
+    domain = constraints.real_vector
+    codomain = constraints.real_vector
+    bijective = True
+
+    def __init__(self, A: Tensor, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.R = torch.linalg.matrix_exp(A - A.mT)
+
+    def _call(self, x: Tensor) -> Tensor:
+        return torch.einsum("...ij,...j->...i", self.R, x)
+
+    def _inverse(self, y: Tensor) -> Tensor:
+        return torch.einsum("...ij,...i->...j", self.R, y)
+
+    def log_abs_det_jacobian(self, x: Tensor, y: Tensor) -> Tensor:
+        return torch.zeros_like(x[..., 0])
+
+
+class LULinearTransform(Transform):
+    r"""Linear map `f(x) = L U x` with LU decomposition.
+
+    `L` is the lower-triangular part of the input matrix (diagonal
+    included, providing `log|det|`); `U` is the strict upper-triangular
+    part plus the identity (unit diagonal), so the forward is a single
+    `L @ U @ x` and the log-abs-determinant is `sum(log|diag(L)|)`.
+
+    Arguments:
+        LU: matrix whose lower / upper triangular parts hold the non-zero
+            elements of `L` and `U`, with shape `(*, D, D)`.
+    """
+
+    domain = constraints.real_vector
+    codomain = constraints.real_vector
+    bijective = True
+
+    def __init__(self, LU: Tensor, **kwargs) -> None:
+        super().__init__(**kwargs)
+        I = torch.eye(LU.shape[-1], dtype=LU.dtype, device=LU.device)
+        self.L = torch.tril(LU)
+        self.U = torch.triu(LU, diagonal=1) + I
+
+    def _call(self, x: Tensor) -> Tensor:
+        return torch.einsum("...ij,...j->...i", self.L @ self.U, x)
+
+    def _inverse(self, y: Tensor) -> Tensor:
+        return torch.linalg.solve_triangular(
+            self.U,
+            torch.linalg.solve_triangular(
+                self.L,
+                y.unsqueeze(-1),
+                upper=False,
+                unitriangular=False,
+            ),
+            upper=True,
+            unitriangular=True,
+        ).squeeze(-1)
+
+    def log_abs_det_jacobian(self, x: Tensor, y: Tensor) -> Tensor:
+        diag = torch.diagonal(self.L, dim1=-1, dim2=-2)
+        ladj = diag.abs().log().sum(dim=-1)
+        return ladj.expand_as(x[..., 0])
