@@ -24,10 +24,11 @@ harness. Sections:
         - default vs beta=1.0 is byte-identical;
         - empirical variance contracts as 1/beta (tempered N(mean, var/beta)).
 
-   D. Potential._from(fn):
-        - wrapped callable matches fn(x) under forward;
+   D. Potential._from(fn) / Potential._instance_from(fn):
+        - _from returns a Potential subclass; instance forwards to fn;
         - enable_grad() + enable_eval() chain through;
-        - .grad(x) matches autograd of fn(x).sum() w.r.t. x.
+        - .grad(x) matches autograd of fn(x).sum() w.r.t. x;
+        - _instance_from returns a ready-to-use instance equivalent to _from(fn)().
 """
 
 from pathlib import Path
@@ -327,6 +328,20 @@ err_grad = (g_potential - g_ref).abs().max().item()
 print(f"  max |u.grad(x) - autograd(fn)| = {err_grad:.3e}")
 assert err_grad < 1e-4, f"grad drift: {err_grad}"
 print("  [OK ] compiled grad / eval fast paths match autograd / fn(x)")
+
+# D.3 — _instance_from returns a ready-to-use instance equivalent to _from(fn)()
+section("D.3  _instance_from(fn) returns an instance equivalent to _from(fn)()")
+u_inst = Potential._instance_from(_U_from).to(device)
+assert isinstance(u_inst, Potential) and not isinstance(u_inst, type), \
+    "_instance_from must return a Potential instance (not a class)"
+y_inst = u_inst(x_fn)
+diff_inst = (y_inst - y_direct).abs().max().item()
+print(f"  max |Potential._instance_from(fn)(x) - fn(x)| = {diff_inst:.3e}")
+assert diff_inst == 0.0, f"_instance_from forward drift: {diff_inst}"
+# Same class as _from(fn) (both build a fresh _FunctionPotential subclass)
+assert isinstance(u_inst, Potential)
+assert type(u_inst).__name__ == "_FunctionPotential"
+print("  [OK ] _instance_from yields a Potential instance with matching forward")
 
 
 # ─────────────────────────────────────────────────────────────────

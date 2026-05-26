@@ -75,6 +75,23 @@ class Potential(nn.Module):
             def forward(self, x: torch.Tensor) -> torch.Tensor:
                 return fn(x)
         return _FunctionPotential
+    
+    @classmethod
+    def _instance_from(cls, fn) -> "Potential":
+        """One-liner variant of `_from` that returns a ready-to-use instance.
+
+        Equivalent to `cls._from(fn)()` — skip if you need to keep the
+        class around (e.g. to instantiate per-device copies); use this
+        when you only ever want a single instance of the wrapped callable.
+
+        Example:
+            def U_fn(x: torch.Tensor) -> torch.Tensor:
+                # x: [N, D] -> U(x): [N]   (batched for efficiency)
+                return 0.5 * (x ** 2).sum(-1) + 2 * torch.cos(x[:, 0])
+
+            u = Potential._instance_from(U_fn).to(device)   # instance, chainable
+        """
+        return cls._from(fn)()
 
     def enable_grad(self, mode: str = "reduce-overhead") -> "Potential":
         """
@@ -403,6 +420,11 @@ class Linear_Combination(Potential):
     specialization that would otherwise re-trace the compiled graph on
     every coefficient change — handy for annealed schedules sharing a
     single compiled forward.
+
+    If you prefer plain Python callables over `Potential` objects, you can
+    skip this class entirely: define `lambda x: sum(c_k * U_k(x) for ...)`
+    yourself and wrap it via `Potential._from(fn)` (class) or
+    `Potential._instance_from(fn)` (instance).
     """
     def __init__(
         self,
