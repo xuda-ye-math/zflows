@@ -47,26 +47,25 @@ class Potential(nn.Module):
         raise NotImplementedError
 
     @classmethod
-    def _from(cls, fn) -> "Potential":
-        """Wrap a stateless callable `(x: Tensor) -> Tensor` as a Potential.
+    def _from(cls, fn) -> type["Potential"]:
+        """Wrap a stateless callable `(x: Tensor) -> Tensor` as a Potential
+        *subclass* — like writing the subclass by hand, just shorter.
 
-        Convenience for one-line definitions that would otherwise require
-        a full subclass with `def __init__(self): super().__init__()` and
-        `def forward(self, x): ...`. The wrapped Potential supports the
-        full toolchain (`.to(device)`, `.enable_grad()`, `.enable_eval()`,
-        `.parameters()`) — there just won't be any learnable parameters
-        because `fn` is a plain function.
+        Returns the class itself (not an instance), so callers instantiate
+        explicitly with `U()` just as they would for `Gaussian(...)` etc.
+        Instances support the full toolchain (`.to(device)`,
+        `.enable_grad()`, `.enable_eval()`, `.parameters()`) — there just
+        won't be any learnable parameters because `fn` is a plain function.
 
         (Method name is `_from`, not `from`, because `from` is a Python
         keyword and can't be a method name.)
 
         Example:
-            def U1(x):
+            def U_fn(x):
                 return 0.5 * (x ** 2).sum(-1) + 2 * torch.cos(x[:, 0])
 
-            U1 = Potential._from(U1)
-            U1.enable_grad()
-            g = U1.grad(x)        # [N, d]
+            U = Potential._from(U_fn)  # class
+            u = U().to(device)         # instance
 
         For potentials that carry state (physical constants, learnable
         sub-modules, …), subclass `Potential` directly instead.
@@ -74,7 +73,7 @@ class Potential(nn.Module):
         class _FunctionPotential(cls):
             def forward(self, x: torch.Tensor) -> torch.Tensor:
                 return fn(x)
-        return _FunctionPotential()
+        return _FunctionPotential
 
     def enable_grad(self, mode: str = "reduce-overhead") -> "Potential":
         """

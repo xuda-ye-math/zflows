@@ -293,20 +293,23 @@ def _U_from(x: torch.Tensor) -> torch.Tensor:
     x1 = x[:, 0]
     return 0.5 * (x ** 2).sum(-1) + 2 * torch.cos(x1)
 
-# D.1 — forward identity
-section("D.1  _from(fn).forward(x) ≡ fn(x)")
-u_fn = Potential._from(_U_from).to(device)
+# D.1 — _from returns a Potential subclass; instances forward to fn
+section("D.1  _from(fn) returns a subclass; instance(x) ≡ fn(x)")
+U_from = Potential._from(_U_from)
+assert isinstance(U_from, type) and issubclass(U_from, Potential), \
+    "_from must return a Potential subclass (not an instance)"
+u_fn = U_from().to(device)
 x_fn = torch.randn(64, 3, device=device)
 y_potential = u_fn(x_fn)
 y_direct    = _U_from(x_fn)
 diff = (y_potential - y_direct).abs().max().item()
-print(f"  max |Potential._from(fn)(x) - fn(x)| = {diff:.3e}")
+print(f"  max |Potential._from(fn)()(x) - fn(x)| = {diff:.3e}")
 assert diff == 0.0, f"forward drift: {diff}"
-print("  [OK ] wrapped forward matches the underlying callable")
+print("  [OK ] subclass instance forwards to the underlying callable")
 
-# D.2 — enable_eval(), enable_grad() chain through
+# D.2 — enable_eval(), enable_grad() chain through on an instance
 section("D.2  enable_eval / enable_grad work on the wrapped Potential")
-u_fn = Potential._from(_U_from).to(device).enable_grad().enable_eval()
+u_fn = U_from().to(device).enable_grad().enable_eval()
 assert u_fn._grad_fn is not None and u_fn._eval_fn is not None, \
     "enable_grad / enable_eval didn't populate the cached fns"
 

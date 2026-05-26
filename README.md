@@ -54,16 +54,16 @@ class U(Potential): # any user-defined energy
 
 The `def __init__(self): super().__init__()` boilerplate is **always recommended**, even when you have no extra state to initialize — skipping it leaves `nn.Module`'s internals uncreated and the next call `u(x)` fails with a cryptic `AttributeError`.
 
-If there are no constructor args and no extra state to worry about, you can also define the `Potential` inline from a plain `(x) -> Tensor` callable using `Potential._from(...)`:
+If there are no constructor args and no extra state to worry about, `Potential._from(...)` writes the subclass boilerplate for you from a plain `(x) -> Tensor` callable. It returns the *class*, so you instantiate it the same way you would `Gaussian(...)`:
 
 ```python
 from zflows.potential import Potential
 
-def U(x: torch.Tensor) -> torch.Tensor: # U(x): Tensor [N, d] -> Tensor [N]
+def U_fn(x: torch.Tensor) -> torch.Tensor: # U(x): Tensor [N, d] -> Tensor [N]
     return ...
 
-u = Potential._from(U).to(device).enable_grad()
-g = u.grad(x) # full toolchain still works
+U = Potential._from(U_fn)   # class — equivalent to writing the subclass by hand
+u = U().to(device)          # instance — full toolchain still works
 ```
 
 (The method name is `_from`, not `from`, because `from` is a Python keyword.) For potentials that carry state — physical constants, learnable sub-modules, etc. — subclass `Potential` directly as above.
