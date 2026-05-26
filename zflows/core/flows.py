@@ -186,6 +186,15 @@ class GeneralCouplingTransform(nn.Module):
     def forward(self) -> Transform:
         return CouplingTransform(self.meta, self.mask)
 
+    def zeros(self) -> None:
+        """Reset to identity by zeroing the last conditioner-MLP layer's
+        weight and bias. With phi = 0 the univariate transform reduces
+        to the identity on the masked-out coordinates.
+        """
+        last = self.hyper[-1]
+        nn.init.zeros_(last.weight)
+        nn.init.zeros_(last.bias)
+
 
 # ──────────────────────────────────────────────────────────────────────
 # FFJORD continuous flow

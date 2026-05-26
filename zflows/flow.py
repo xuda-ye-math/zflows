@@ -389,14 +389,9 @@ class RealNVP(Flow):
         return ComposedTransform(*[layer() for layer in self._layers])
 
     def zeros(self) -> None:
-        """Reset each layer to identity:
-           - coupling: zero the last conditioner layer's weight/bias;
-           - mixing:   delegate to LinearMixingTransform.zeros() (A=0 / LU=I).
+        """Reset every layer to identity. `GeneralCouplingTransform` and
+        `LinearMixingTransform` both expose a `.zeros()` method, so the
+        same iteration handles couplings and mixing layers uniformly.
         """
         for layer in self._layers:
-            if isinstance(layer, LinearMixingTransform):
-                layer.zeros()
-            else:
-                last = layer.hyper[-1]
-                nn.init.zeros_(last.weight)
-                nn.init.zeros_(last.bias)
+            layer.zeros()

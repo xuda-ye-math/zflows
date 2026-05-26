@@ -534,6 +534,24 @@ for kind in ("rotation", "lu"):
         print(f"  FAIL: mixing={kind}: missing grads on {n_params - n_grads} params")
         sys.exit(1)
 
+    # 14f — captured F stays consistent under parameter mutation.
+    # This is the central capture-once contract relied on by
+    # zflows.loss.compile_raw / compile_beta. Mixing layers must reread
+    # their weight on every forward; eager-cached R / L / U regress here.
+    torch.manual_seed(99)
+    flow_cap = RealNVP(dimension=4, transforms=4, mixing=kind, hidden_features=(32, 32)).to(device)
+    F_captured = flow_cap.t()
+    x_cap = torch.randn(16, 4, device=device)
+    # Simulate one optimizer.step() of in-place parameter updates.
+    with torch.no_grad():
+        for p in flow_cap.parameters():
+            p.add_(0.1 * torch.randn_like(p))
+    with torch.no_grad():
+        y_cap, ladj_cap = F_captured.call_and_ladj(x_cap)
+        y_fresh, ladj_fresh = flow_cap.t().call_and_ladj(x_cap)
+    assert_close(y_cap,    y_fresh,    atol=1e-6, name=f"14f  captured F sees param updates: y    (mixing={kind})")
+    assert_close(ladj_cap, ladj_fresh, atol=1e-6, name=f"14f  captured F sees param updates: ladj (mixing={kind})")
+
 # 14e — lu mixing: after one optimizer step weights diverge from I and ladj is non-zero
 print()
 print("  --- 14e  lu mixing contributes a non-trivial log|det| after one Adam step ---")
@@ -561,6 +579,42 @@ if abs(ladj_after.item()) <= 1e-3:
     print(f"  FAIL: LU log|det| stayed near zero ({ladj_after.item()})")
     sys.exit(1)
 print("  [OK ] lu mixing layers produce a non-trivial log|det| after training")
+
+# ─────────────────────────────────────────────────────────────────
+banner("15. Captured F sees param updates (NSF, CNF)")
+# Same capture-once-then-mutate contract as §14f, but for NSF and CNF
+# rather than RealNVP's mixing layers. Catches any regression where a
+# subclass of Transform snapshots derived state in __init__ instead of
+# re-reading the underlying nn.Parameter via attribute access.
+
+# NSF — MaskedAutoregressiveTransform.meta(x) is the lazy hook.
+torch.manual_seed(100)
+flow_nsf = NSF(a=[-3.0]*4, b=[3.0]*4, bins=8, transforms=2, hidden_features=(32, 32))
+F_nsf = flow_nsf.t()
+x15 = torch.randn(16, 4) * 0.5  # keep inside the box
+with torch.no_grad():
+    for p in flow_nsf.parameters():
+        p.add_(0.05 * torch.randn_like(p))
+with torch.no_grad():
+    y_cap, ladj_cap = F_nsf.call_and_ladj(x15)
+    y_fresh, ladj_fresh = flow_nsf.t().call_and_ladj(x15)
+assert_close(y_cap,    y_fresh,    atol=1e-6, name="15a  NSF captured F sees param updates: y")
+assert_close(ladj_cap, ladj_fresh, atol=1e-6, name="15a  NSF captured F sees param updates: ladj")
+
+# CNF — FreeFormJacobianTransform holds a reference to the velocity module
+# whose parameters update in place; the ODE integrator should reread them.
+torch.manual_seed(101)
+flow_cnf = CNF(dimension=2, frequency=3, hidden_features=(16, 16))
+F_cnf = flow_cnf.t()
+x15c = torch.randn(8, 2) * 0.5
+with torch.no_grad():
+    for p in flow_cnf.parameters():
+        p.add_(0.05 * torch.randn_like(p))
+with torch.no_grad():
+    y_cap, ladj_cap = F_cnf.call_and_ladj(x15c)
+    y_fresh, ladj_fresh = flow_cnf.t().call_and_ladj(x15c)
+assert_close(y_cap,    y_fresh,    atol=1e-4, name="15b  CNF captured F sees param updates: y")
+assert_close(ladj_cap, ladj_fresh, atol=1e-4, name="15b  CNF captured F sees param updates: ladj")
 
 # ─────────────────────────────────────────────────────────────────
 print()

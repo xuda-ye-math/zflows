@@ -201,7 +201,12 @@ def compile_beta(
         mode:      torch.compile mode (keyword-only). Default 'default'.
 
     Returns:
-        callable (x_batch: Tensor, beta: float | Tensor = 1.0) -> scalar.
+        callable `(x_batch: Tensor, beta: float | 0-d Tensor = 1.0) -> scalar`.
+        `beta` must be a scalar — a Python `float`/`int` or a 0-d
+        `torch.Tensor`. Higher-rank tensors (e.g. shape `[1]` or `[N]`
+        for per-sample tempering) are NOT supported: Dynamo would trace
+        a different graph per shape, defeating the cache-stability
+        guarantee. Build a per-sample loss helper if you need that.
 
     Example (annealing schedule, no recompile):
         loss = zflows.loss.compile_beta(reverse_KL, u1, F)
@@ -215,10 +220,13 @@ def compile_beta(
         return loss_fn(x, *captured, beta)
 
     def wrapper(x: torch.Tensor, beta: float | torch.Tensor = 1.0) -> torch.Tensor:
-        # Cast Python scalars to a 0-d tensor so Dynamo treats beta as a
-        # dynamic input rather than specializing on its value. A 0-d
-        # tensor passes through .item()-free arithmetic in the loss body.
+        # Cast Python scalars to a 0-d tensor so Dynamo doesn't specialize.
         if not isinstance(beta, torch.Tensor):
             beta = torch.as_tensor(beta, dtype=x.dtype, device=x.device)
+        # Higher-rank beta would trigger per-shape recompiles.
+        assert beta.dim() == 0, (
+            f"compile_beta(): beta must be a scalar (Python float/int or "
+            f"0-d Tensor); got shape {tuple(beta.shape)}."
+        )
         return compiled(x, beta)
     return wrapper

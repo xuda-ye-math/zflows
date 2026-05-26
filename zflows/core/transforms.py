@@ -655,6 +655,14 @@ class RotationTransform(Transform):
     orthogonal, so the transform is volume-preserving and its
     log-abs-determinant is identically zero.
 
+    `A` is stored by reference (NOT eagerly mapped to `R`) so that
+    downstream in-place updates to the underlying `nn.Parameter` —
+    typically `optimizer.step()` — are picked up on the next forward
+    without the caller having to rebuild the transform. This mirrors
+    the lazy-read behaviour of `AutoregressiveTransform.meta` and is
+    what makes the `compile_raw` capture-once contract work for
+    `LinearMixingTransform`.
+
     Arguments:
         A: square matrix `A`, with shape `(*, D, D)`.
     """
@@ -665,7 +673,11 @@ class RotationTransform(Transform):
 
     def __init__(self, A: Tensor, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.R = torch.linalg.matrix_exp(A - A.mT)
+        self.A = A  # reference, not the eager exp(A - A^T)
+
+    @property
+    def R(self) -> Tensor:
+        return torch.linalg.matrix_exp(self.A - self.A.mT)
 
     def _call(self, x: Tensor) -> Tensor:
         return torch.einsum("...ij,...j->...i", self.R, x)
@@ -676,6 +688,15 @@ class RotationTransform(Transform):
     def log_abs_det_jacobian(self, x: Tensor, y: Tensor) -> Tensor:
         return torch.zeros_like(x[..., 0])
 
+    def call_and_ladj(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        # Compute R once and share between y and ladj — this is the path
+        # ComposedTransform.call_and_ladj takes during training, so the
+        # matrix exponential runs exactly once per forward step.
+        R = torch.linalg.matrix_exp(self.A - self.A.mT)
+        y = torch.einsum("...ij,...j->...i", R, x)
+        ladj = torch.zeros_like(x[..., 0])
+        return y, ladj
+
 
 class LULinearTransform(Transform):
     r"""Linear map `f(x) = L U x` with LU decomposition.
@@ -684,6 +705,11 @@ class LULinearTransform(Transform):
     included, providing `log|det|`); `U` is the strict upper-triangular
     part plus the identity (unit diagonal), so the forward is a single
     `L @ U @ x` and the log-abs-determinant is `sum(log|diag(L)|)`.
+
+    `LU` is stored by reference (NOT eagerly split into `L` / `U`) so
+    that downstream in-place updates to the underlying `nn.Parameter`
+    are picked up on the next forward; same lazy-read contract as
+    `RotationTransform`.
 
     Arguments:
         LU: matrix whose lower / upper triangular parts hold the non-zero
@@ -696,9 +722,16 @@ class LULinearTransform(Transform):
 
     def __init__(self, LU: Tensor, **kwargs) -> None:
         super().__init__(**kwargs)
-        I = torch.eye(LU.shape[-1], dtype=LU.dtype, device=LU.device)
-        self.L = torch.tril(LU)
-        self.U = torch.triu(LU, diagonal=1) + I
+        self.LU = LU  # reference, not the eager tril / triu split
+
+    @property
+    def L(self) -> Tensor:
+        return torch.tril(self.LU)
+
+    @property
+    def U(self) -> Tensor:
+        I = torch.eye(self.LU.shape[-1], dtype=self.LU.dtype, device=self.LU.device)
+        return torch.triu(self.LU, diagonal=1) + I
 
     def _call(self, x: Tensor) -> Tensor:
         return torch.einsum("...ij,...j->...i", self.L @ self.U, x)
@@ -720,3 +753,14 @@ class LULinearTransform(Transform):
         diag = torch.diagonal(self.L, dim1=-1, dim2=-2)
         ladj = diag.abs().log().sum(dim=-1)
         return ladj.expand_as(x[..., 0])
+
+    def call_and_ladj(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        # Compute L and U once and share — ComposedTransform.call_and_ladj
+        # routes through here on the training hot path.
+        I = torch.eye(self.LU.shape[-1], dtype=self.LU.dtype, device=self.LU.device)
+        L = torch.tril(self.LU)
+        U = torch.triu(self.LU, diagonal=1) + I
+        y = torch.einsum("...ij,...j->...i", L @ U, x)
+        diag = torch.diagonal(L, dim1=-1, dim2=-2)
+        ladj = diag.abs().log().sum(dim=-1).expand_as(x[..., 0])
+        return y, ladj
