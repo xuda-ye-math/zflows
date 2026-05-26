@@ -535,23 +535,6 @@ On raw speed: with `torch.compile` in the training loop (via `compile_raw` / `co
 
 </details>
 
-<details>
-<summary><strong>Q: Can I install <code>zflows</code> directly from PyPI with <code>pip install zflows</code>?</strong></summary>
-
-Not at the moment. The author has no immediate plan to ship `zflows` to PyPI because the API is still moving and long-term maintenance is not guaranteed — a PyPI release implies a stability promise the project cannot yet make. A PyPI release may happen in the future once the interface settles.
-
-For now, follow the local editable install in the [Installation](#installation) section:
-
-```bash
-git clone https://github.com/xuda-ye-math/zflows.git
-cd zflows
-pip install -e .
-```
-
-Once `pip install -e .` succeeds, the package is registered against your local clone, so you can safely delete the GitHub remote (or even the `.git` directory) and `import zflows` will keep working. If you do, remember that `pip uninstall zflows` followed by a fresh `pip install -e .` will still need the source tree on disk — keep the cloned folder around, you just don't need its git history.
-
-</details>
-
 ## Acknowledgements
 
 `zflows` is strongly inspired by [zuko](https://github.com/probabilists/zuko); the flow, transform, and masked-MLP machinery vendored into `zflows.core` is a stripped-down port of zuko's. Credit for the underlying design — and for the clean, composable `Transform` API the public flows build on — belongs to the zuko authors.

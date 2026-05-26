@@ -4,15 +4,47 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zflows"
-version = "0.5.2"
-description = "PyTorch normalizing flows for unconditional energy-based sampling. Strongly inspired by zuko."
-authors = [{ name = "Xuda" }]
+version = "0.5.3"
+description = "PyTorch normalizing flows for unconditional energy-based sampling and Boltzmann generators."
+readme = "README.md"
+authors = [{ name = "Xuda", email = "abneryepku@gmail.com" }]
 license = { text = "MIT" }
 requires-python = ">=3.10"
+keywords = [
+    "normalizing-flows",
+    "boltzmann-generator",
+    "pytorch",
+    "sampling",
+    "smc",
+    "neural-spline-flows",
+    "ot-flow",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Physics",
+]
 dependencies = [
     "torch>=2.10.0",
     "numpy>=2.4.0",
 ]
+
+[project.urls]
+Homepage   = "https://github.com/xuda-ye-math/zflows"
+Repository = "https://github.com/xuda-ye-math/zflows"
+Issues     = "https://github.com/xuda-ye-math/zflows/issues"
+Changelog  = "https://github.com/xuda-ye-math/zflows/releases"
 
 [tool.setuptools.packages.find]
 include = ["zflows*"]
