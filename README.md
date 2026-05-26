@@ -130,6 +130,24 @@ compute_CESS(source_weights, importance_weights)
 
 Together these compose into a complete *propose → reweight → resample → rejuvenate* pipeline with no glue code on the user side.
 
+**Package layout.**
+
+```
+zflows
+├── core
+│   ├── flows.py
+│   ├── __init__.py
+│   ├── nn.py
+│   ├── numerics.py
+│   ├── otflow.py
+│   └── transforms.py
+├── flow.py
+├── __init__.py
+├── loss.py
+├── potential.py
+└── utils.py
+```
+
 ## Installation
 
 `zflows` is pure Python; the only runtime dependency is [`torch`](https://pytorch.org), resolved automatically by `pip` (`numpy` is pulled in transitively).
