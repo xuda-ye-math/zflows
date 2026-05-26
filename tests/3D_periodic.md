@@ -26,11 +26,11 @@ $$
 $$
 because `flow.t().call_and_ladj(x)` returns the same `(y, ladj)` interface.
 
-**Compiled training step.** The script wraps the loss with `zflows.loss.compile(...)` once before the training loop, capturing `F = flow.t()` as a closure constant:
+**Compiled training step.** The script wraps the loss with `zflows.loss.compile_raw(...)` once before the training loop, capturing `F = flow.t()` as a closure constant. `compile_raw` is the single-input fast path; `compile_beta` (sibling helper with a runtime `beta` argument) is for adaptive-temperature schedules and is not needed here since $\beta = 1.0$ throughout.
 
 ```python
 F = flow.t()
-loss_fn = zflows.loss.compile(reverse_KL, u1, F)
+loss_fn = zflows.loss.compile_raw(reverse_KL, u1, F)
 for epoch in range(EPOCH):
     for x_batch in ...:
         loss = loss_fn(x_batch)

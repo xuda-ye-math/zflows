@@ -170,7 +170,7 @@ u1 = U1().to(device)
 # ulc(x) = 1.0 * U0(x) + 1.2 * U1(x)
 # = 0.5 * (x1^2 + x2^2) + 2.4 * cos(x1)
 # x2 ~ standard normal; x1 modulated by cosine (still even, mean ≈ 0).
-ulc = Linear_Combination(u0, u1, 1.0, 1.2)
+ulc = Linear_Combination([u0, u1], [1.0, 1.2])
 ulc.enable_grad()
 
 # Langevin chain

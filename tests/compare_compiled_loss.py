@@ -1,6 +1,6 @@
 # pyright: reportOperatorIssue=false, reportArgumentType=false, reportCallIssue=false
 
-"""Benchmark `zflows.loss.compile` against the raw `reverse_KL(x, target, flow.t())`
+"""Benchmark `zflows.loss.compile_raw` against the raw `reverse_KL(x, target, flow.t())`
 pattern across an NSF (d × hidden_features) grid.
 
 What is measured:
@@ -9,8 +9,8 @@ What is measured:
         optimizer.zero_grad(); loss.backward(); optimizer.step()
     in three modes:
         raw                   — fresh flow.t() per call, no compile
-        compiled-default      — zflows.loss.compile(..., mode='default')
-        compiled-reduce-overhead — zflows.loss.compile(..., mode='reduce-overhead')
+        compiled-default      — zflows.loss.compile_raw(..., mode='default')
+        compiled-reduce-overhead — zflows.loss.compile_raw(..., mode='reduce-overhead')
 
 torch.compile wraps only the forward; backward + Adam.step run in eager
 regardless of mode. The reported numbers therefore include compile-eligible
@@ -79,28 +79,19 @@ def build_loss_fn(
 ) -> Callable[[torch.Tensor], torch.Tensor]:
     """Return a callable (x_batch) -> scalar loss for the requested mode.
 
-    For the compiled modes we pre-allocate a 0-d `beta` tensor and bind it
-    into the closure so the inner loop's call site looks like
-    `loss_fn(x_batch)` while the compile wrapper's fast path (beta is
-    already a Tensor) skips the per-step torch.as_tensor() allocation.
+    The compiled modes use `zflows.loss.compile_raw` — the single-input
+    fast path with no wrapper / cast overhead — since the benchmark
+    measures a fixed-beta workload.
     """
     if mode == "raw":
-        # match the existing 4D_Boltzmann_generator.py pattern verbatim
         def raw_loss(x: torch.Tensor) -> torch.Tensor:
             return reverse_KL(x, target=potential, F=flow.t())
         return raw_loss
-
     if mode == "default":
-        compiled = zloss.compile(reverse_KL, potential, flow.t(), mode="default")
-    elif mode == "reduce-overhead":
-        compiled = zloss.compile(reverse_KL, potential, flow.t(), mode="reduce-overhead")
-    else:
-        raise ValueError(f"unknown mode {mode!r}")
-
-    beta_t = torch.tensor(1.0, device=next(flow.parameters()).device)
-    def call(x: torch.Tensor) -> torch.Tensor:
-        return compiled(x, beta_t)
-    return call
+        return zloss.compile_raw(reverse_KL, potential, flow.t(), mode="default")
+    if mode == "reduce-overhead":
+        return zloss.compile_raw(reverse_KL, potential, flow.t(), mode="reduce-overhead")
+    raise ValueError(f"unknown mode {mode!r}")
 
 
 def time_full_step(
@@ -142,8 +133,8 @@ def sanity_check_compiled_matches_raw(
             hidden_features=hf).to(x.device)
     with torch.no_grad():
         l_raw = reverse_KL(x, target=potential, F=f.t()).item()
-        l_def = zloss.compile(reverse_KL, potential, f.t(), mode="default")(x).item()
-        l_red = zloss.compile(reverse_KL, potential, f.t(), mode="reduce-overhead")(x).item()
+        l_def = zloss.compile_raw(reverse_KL, potential, f.t(), mode="default")(x).item()
+        l_red = zloss.compile_raw(reverse_KL, potential, f.t(), mode="reduce-overhead")(x).item()
     if abs(l_def - l_raw) > atol or abs(l_red - l_raw) > atol:
         sys.exit(
             f"FAIL — compile-induced numerical drift at (d={d}, hf={hf}): "

@@ -346,37 +346,62 @@ class Gaussian_Mixture(Potential):
 
 class Linear_Combination(Potential):
     """
-    Linear combination of two potentials:
-        U(x) = c0 * U0(x) + c1 * U1(x).
-    Useful for Boltzmann interpolations U_t = (1 - t) * U0 + t * U1, where
-    c0, c1 are typically swapped between integrator steps.
+    Linear combination of N potentials:
+        U(x) = sum_k c_k * U_k(x).
+    Useful for Boltzmann interpolations U_t = (1 - t) * U_0 + t * U_1 (the
+    common N = 2 case), but generalizes naturally to multi-rung bridges
+    and convex mixtures of an arbitrary number of building-block energies.
 
-    The two child potentials are stored by reference (auto-registered as
-    submodules), so .to(device), .parameters(), and .state_dict() recurse
-    through them. Mutating self.c0 / self.c1 in place takes effect on the
-    next forward call.
+    The child potentials are stored as an `nn.ModuleList`, so
+    `.to(device)`, `.parameters()`, and `.state_dict()` recurse through
+    them. Coefficients are stored on `self.coeffs` in one of two forms:
+
+      - **Python list of floats** (the simplest case). Mutate
+        `self.coeffs[k] = new_value` between iterations to retune one
+        term. Immune to `.to(device)` — `float * Tensor` lifts to the
+        tensor's device automatically.
+      - **`torch.Tensor` of shape `[N]`**. Registered as an `nn.Module`
+        buffer so `.to(device)` / `.cuda()` / `.float()` move it along
+        with the potentials — that's the redundancy that keeps a stray
+        `.to('cuda')` from leaving the coeffs on CPU and tripping a
+        device-mismatch error on the next forward. Mutate in place via
+        `self.coeffs[k] = new_value` or `self.coeffs.fill_(...)`; do NOT
+        reassign `self.coeffs = ...` (that would shadow the buffer with
+        a plain attribute and undo the device tracking).
+
+    A device-resident tensor also avoids the Dynamo Python-float
+    specialization that would otherwise re-trace the compiled graph on
+    every coefficient change — handy for annealed schedules sharing a
+    single compiled forward.
     """
     def __init__(
         self,
-        U0: "Potential",
-        U1: "Potential",
-        c0: float,
-        c1: float | None = None,
+        potentials: list["Potential"] | tuple["Potential", ...],
+        coeffs: list[float] | tuple[float, ...] | torch.Tensor,
     ):
         """
         Input:
-            U0: Potential       first potential U0
-            U1: Potential       second potential U1
-            c0: float           coefficient of U0
-            c1: float | None    coefficient of U1; if None, defaults to 1 - c0,
-                                giving the convex interpolation
-                                U = c0 * U0 + (1 - c0) * U1.
+            potentials: list/tuple of N Potential instances (N >= 1)
+            coeffs:     list/tuple of N floats, or a 1-d Tensor of shape
+                        [N], holding the matching coefficients.
+
+        Both inputs must be non-empty and have the same length.
         """
         super().__init__()
-        self.U0 = U0
-        self.U1 = U1
-        self.c0 = c0
-        self.c1 = 1.0 - c0 if c1 is None else c1
+        assert len(potentials) == len(coeffs), \
+            f"potentials ({len(potentials)}) and coeffs ({len(coeffs)}) must have the same length"
+        assert len(potentials) >= 1, "Linear_Combination needs at least one term"
+        self.potentials = nn.ModuleList(potentials)
+        if isinstance(coeffs, torch.Tensor):
+            assert coeffs.ndim == 1, \
+                f"Tensor coeffs must be 1-d, got shape {tuple(coeffs.shape)}"
+            # Register as a buffer so .to(device) / .cuda() / .float() etc.
+            # move the coeffs in lock-step with the potentials' parameters
+            # and buffers. Without this, a tensor stored as a plain attribute
+            # would stay on its original device while the potentials move.
+            self.register_buffer("coeffs", coeffs)
+        else:
+            self.coeffs = list(coeffs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -385,4 +410,7 @@ class Linear_Combination(Potential):
         Output:
             U(x): Tensor [N]
         """
-        return self.c0 * self.U0(x) + self.c1 * self.U1(x)
+        out = self.coeffs[0] * self.potentials[0](x)
+        for c, U in zip(self.coeffs[1:], self.potentials[1:]):
+            out = out + c * U(x)
+        return out

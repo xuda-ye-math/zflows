@@ -642,7 +642,7 @@ def check_compile_available() -> bool:
       3. **Sanity test (authoritative):** actually `torch.compile` a small
          function and run one forward pass. On CUDA, uses
          `mode='reduce-overhead'` (the mode that `Potential.enable_grad` /
-         `enable_eval` and `loss.compile` default to); on CPU, uses
+         `enable_eval` default to; `loss.compile_raw` / `compile_beta` default to `'default'`); on CPU, uses
          `mode='default'`. The return value is True iff this step succeeds.
 
     Prints a one-line PASS/WARN/FAIL summary for each step.
@@ -730,9 +730,10 @@ def set_cache_size_limit(limit: int = 8) -> None:
     closures sharing one code body can exceed the limit and silently fall
     back to eager from cell N+1 onward. Common triggers:
 
-      - hyperparameter sweeps where `zflows.loss.compile` is called once
-        per cell (each call produces a fresh closure on the same code
-        object, distinguished by the captured `transform` and `potential`);
+      - hyperparameter sweeps where `zflows.loss.compile_raw` /
+        `compile_beta` are called once per cell (each call produces a
+        fresh closure on the same code object, distinguished by the
+        captured `transform` and `potential`);
       - annealed training that constructs many short-lived `Potential`
         instances of the same subclass, each calling `.enable_grad()`;
       - scripts that mix several distinct compiled functions.
@@ -763,7 +764,7 @@ def set_cache_size_limit(limit: int = 8) -> None:
 def suppress_warnings() -> None:
     """Silence the various warning/log channels that PyTorch, Triton, and
     Inductor emit during a typical zflows training run (especially with
-    `torch.compile` / `zflows.loss.compile` in the loop).
+    `torch.compile` / `zflows.loss.compile_raw` / `compile_beta` in the loop).
 
     Covers four orthogonal layers of noise:
       1. **Python `warnings`** (e.g. inductor's TF32 hint, deprecation

@@ -83,39 +83,28 @@ def target_KL_G(y: torch.Tensor, source: Potential, G: ComposedTransform, beta: 
 
 
 # ──────────────────────────────────────────────────────────────────────
-# compile — torch.compile a loss with all its non-batch args captured
+# compile_raw / compile_beta — torch.compile a loss with captured args
 # ──────────────────────────────────────────────────────────────────────
 
-def compile(
+def compile_raw(
     loss_fn: Callable[..., torch.Tensor],
     *captured,
     mode: str = 'default',
-) -> Callable[..., torch.Tensor]:
-    """torch.compile any loss whose first argument is the per-batch tensor,
-    last argument is the inverse temperature `beta`, and the rest are
-    Python objects that should be baked into the closure.
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    """torch.compile a loss whose only runtime argument is the per-batch
+    tensor; everything else is captured as a Python closure constant.
 
-    The four KL losses in this module all share the positional signature
-    `(samples, potential, transform, beta) -> scalar`, so the canonical
-    call is `compile(reverse_KL, potential, transform)` and the returned
-    closure has signature `(x_batch, beta=1.0) -> scalar`. The helper is
-    generic: any `loss_fn(x, *captured, beta) -> scalar` works.
+    The four KL losses in `zflows.loss` all match this shape, so the
+    canonical call is `compile_raw(reverse_KL, potential, transform)`
+    and the returned closure has signature `(x_batch) -> scalar`. If you
+    want a non-default `beta` baked in, pass it as a captured constant:
+    `compile_raw(reverse_KL, potential, transform, 0.7)` makes `beta=0.7`
+    a closure constant. For adaptive `beta` across steps without
+    recompiling, see `compile_beta` instead.
 
-    Why beta is a runtime argument:
-        - Annealing / replica exchange / ESS-targeted schedules need to
-          vary beta across training steps without rebuilding the loss.
-        - To avoid a recompile per beta value (Dynamo specializes on
-          Python `float`s by guarding on the value), beta is cast to a
-          0-d tensor inside the wrapper before entering the compiled
-          graph, so a single compiled artifact handles every beta.
-        - Cost of the cast is ~1 microsecond per call — negligible
-          against the multi-millisecond training step.
-        - Passing beta directly as a 0-d tensor (e.g. one held on the
-          device) skips the cast entirely.
-
-    Why capture the rest as closure constants:
+    Why capture the heavy arguments as closure constants:
         - `torch.compile`'s Dynamo guards each cached specialization by
-          input identity. The natural `loss_fn(x, target, flow.t())`
+          input identity. The natural `reverse_KL(x, target, flow.t())`
           pattern builds a fresh `ComposedTransform` Python object per
           call, so Dynamo either retraces every iteration or hits
           `BACKEND_MATCH` failures — either way the speedup vanishes.
@@ -143,6 +132,66 @@ def compile(
         - Dynamo retraces on tensor-shape changes. Keep `BATCH` fixed.
 
     Arguments:
+        loss_fn:   any callable with signature `(x, *captured) -> scalar`.
+                   The four KL losses in this module all fit (with `beta`
+                   absorbed into `captured` or left at its default 1.0).
+        *captured: the rest of `loss_fn`'s positional arguments, baked
+                   into the returned closure. For the KL losses this is
+                   `(potential, transform)` (omit `beta` to keep its
+                   default 1.0) or `(potential, transform, beta)` to fix
+                   a specific tempering.
+        mode:      torch.compile mode (keyword-only). Default 'default'.
+
+    Returns:
+        callable (x_batch: Tensor) -> scalar loss.
+
+    Example:
+        F = flow.t()
+        loss = zflows.loss.compile_raw(reverse_KL, u1, F)
+        for x_batch in batches:
+            l = loss(x_batch)
+            optimizer.zero_grad(); l.backward(); optimizer.step()
+    """
+    @torch.compile(mode=mode)
+    def compiled(x: torch.Tensor) -> torch.Tensor:
+        return loss_fn(x, *captured)
+    return compiled
+
+
+def compile_beta(
+    loss_fn: Callable[..., torch.Tensor],
+    *captured,
+    mode: str = 'default',
+) -> Callable[..., torch.Tensor]:
+    """torch.compile a loss whose last positional argument is the
+    inverse temperature `beta`, kept as a *runtime* input so adaptive
+    or annealed schedules can vary it across steps without triggering
+    a recompile.
+
+    The four KL losses in `zflows.loss` all have signature
+    `(x, potential, transform, beta) -> scalar`, so the canonical call
+    is `compile_beta(reverse_KL, potential, transform)` and the returned
+    closure has signature `(x_batch, beta=1.0) -> scalar`. For a fixed
+    `beta` baked into the graph, prefer `compile_raw` — it skips the
+    wrapper / cast overhead entirely.
+
+    Why beta is a runtime argument:
+        - Annealing / replica exchange / ESS-targeted schedules need to
+          vary beta across training steps without rebuilding the loss.
+        - To avoid a recompile per beta value (Dynamo specializes on
+          Python `float`s by guarding on the value), beta is cast to a
+          0-d tensor inside the wrapper before entering the compiled
+          graph, so a single compiled artifact handles every beta.
+        - Cost of the cast is ~1 microsecond per call — negligible
+          against the multi-millisecond training step.
+        - Passing beta directly as a 0-d tensor (e.g. one held on the
+          device) skips the cast entirely; pre-allocate it once with
+          `beta_t = torch.tensor(0.5, device=device)` for tightest loops.
+
+    All the captured-once / Dynamo-cache-stability arguments from
+    `compile_raw` carry over verbatim.
+
+    Arguments:
         loss_fn:   any callable with signature
                    `(x, *captured, beta) -> scalar`. The four KL losses
                    in this module all fit.
@@ -154,15 +203,8 @@ def compile(
     Returns:
         callable (x_batch: Tensor, beta: float | Tensor = 1.0) -> scalar.
 
-    Example (canonical KL case, fixed beta):
-        F = flow.t()
-        loss = zflows.loss.compile(reverse_KL, u1, F)
-        for x_batch in batches:
-            l = loss(x_batch)                       # beta = 1.0
-            optimizer.zero_grad(); l.backward(); optimizer.step()
-
     Example (annealing schedule, no recompile):
-        loss = zflows.loss.compile(reverse_KL, u1, F)
+        loss = zflows.loss.compile_beta(reverse_KL, u1, F)
         for step, x_batch in enumerate(batches):
             beta = min(1.0, step / 1000)
             l = loss(x_batch, beta)
