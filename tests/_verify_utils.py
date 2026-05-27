@@ -17,6 +17,10 @@ into one banner-separated harness. Sections:
       `optimization` alias.
    D. Importance-weight reweighting: default vs (beta_source, beta_target)
       = (1, 1) byte-equality, linearity in each beta.
+   E. Stochastic Heun integrator: convergence + anisotropic mixing,
+      inverse-temperature beta scaling, reduced discretization bias vs
+      Euler-Maruyama (ULA) at matched step, enable_grad gating,
+      chunk-equivalence.
 """
 
 import math
@@ -26,7 +30,7 @@ import torch
 from zflows.potential import Gaussian, Potential
 from zflows.flow import NSF
 from zflows.utils import (
-    hmc, langevin, lbfgs, optimization,
+    hmc, langevin, stochastic_heun, lbfgs, optimization,
     importance_weights, importance_weights_log,
     set_cache_size_limit, suppress_warnings,
 )
@@ -489,6 +493,94 @@ err_fwd = (w_actual - w_expected).abs().max().item()
 print(f"  max |w_actual - w_expected| = {err_fwd:.3e}")
 assert err_fwd < 1e-6, f"linear wrapper drops the betas: {err_fwd}"
 print("  [OK ] kwargs reach the log-space implementation")
+
+
+# ══════════════════════════════════════════════════════════════════
+# E. Stochastic Heun integrator
+# ══════════════════════════════════════════════════════════════════
+banner("E. stochastic_heun: convergence, beta, lower bias than ULA, gating")
+
+u = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device).enable_grad()
+
+# E.1 — convergence + anisotropic mixing: broad init contracts onto target
+section("E.1  broad init pulls onto target; anisotropic axes mix")
+u_aniso = Gaussian(mean=[1.0, -2.0], variance=[1.0, 4.0]).to(device).enable_grad()
+torch.manual_seed(1)
+x0 = torch.randn(20000, 2, device=device) * 5.0
+x = stochastic_heun(x0, potential=u_aniso, step=5e-3, iters=3000, chunk=2)
+mean1, std1 = x.mean(0).tolist(), x.std(0).tolist()
+print(f"   mean = {[f'{v:+.3f}' for v in mean1]}   (target [+1.000, -2.000])")
+print(f"   std  = {[f'{v:.3f}' for v in std1]}   (target [1.000, 2.000])")
+assert abs(mean1[0] - 1.0) < 0.06 and abs(mean1[1] + 2.0) < 0.08, f"mean off: {mean1}"
+assert abs(std1[0] - 1.0) < 0.06 and abs(std1[1] - 2.0) < 0.08, f"std off: {std1}"
+assert torch.isfinite(x).all(), "stochastic_heun produced NaN/Inf"
+print("  [OK ] both axes converge to the correct moments")
+
+# E.2 — inverse-temperature beta: stationary of N(0, I) at beta is N(0, I/beta)
+section("E.2  beta scales stationary variance as 1/beta")
+torch.manual_seed(2)
+x0 = u.samples(20000)
+y_b1 = stochastic_heun(x0.clone(), potential=u, beta=1.0, step=5e-3, iters=2000)
+y_b4 = stochastic_heun(x0.clone(), potential=u, beta=4.0, step=5e-3, iters=2000)
+var1 = y_b1.var(dim=0).mean().item() # target ~1.0
+var4 = y_b4.var(dim=0).mean().item() # target ~0.25
+print(f"  stationary var:  beta=1.0 -> {var1:.4f} (expect ~1.00)")
+print(f"                   beta=4.0 -> {var4:.4f} (expect ~0.25)")
+assert abs(var1 - 1.0)  < 0.04, f"beta=1 cloud variance off: {var1}"
+assert abs(var4 - 0.25) < 0.02, f"beta=4 cloud variance off: {var4}"
+print("  [OK ] beta=4.0 contracts variance 4x")
+
+# E.3 — headline property: the trapezoidal drift cancels the leading O(step)
+# bias of Euler-Maruyama. On N(0, I) at step=0.2 the analytic ULA stationary
+# variance is 1/(1 - step/2) = 1.1111 (an +0.11 bias); Heun's is ~0.989. So at
+# a *matched* step, Heun's stationary variance must sit much closer to 1.0.
+section("E.3  lower discretization bias than Euler-Maruyama at matched step")
+BIG_STEP, ITERS_E, N_E = 0.2, 1500, 40000
+torch.manual_seed(3)
+x0 = u.samples(N_E)
+torch.manual_seed(30)
+y_ula  = langevin(x0.clone(), potential=u, step=BIG_STEP, iters=ITERS_E) # ULA
+torch.manual_seed(30)
+y_heun = stochastic_heun(x0.clone(), potential=u, step=BIG_STEP, iters=ITERS_E)
+var_ula  = y_ula.var(dim=0).mean().item()
+var_heun = y_heun.var(dim=0).mean().item()
+bias_ula, bias_heun = abs(var_ula - 1.0), abs(var_heun - 1.0)
+print(f"  Euler-Maruyama (ULA) stationary var = {var_ula:.4f}  (|bias| = {bias_ula:.4f}, analytic 1.1111)")
+print(f"  stochastic Heun      stationary var = {var_heun:.4f}  (|bias| = {bias_heun:.4f})")
+assert bias_ula > 0.08, f"ULA bias unexpectedly small ({bias_ula}) — test can't discriminate"
+assert bias_heun < 0.5 * bias_ula, f"Heun did not reduce the ULA bias: {bias_heun} vs {bias_ula}"
+print("  [OK ] Heun more than halves the Euler-Maruyama variance bias")
+
+# E.4 — enable_grad gate
+section("E.4  stochastic_heun() raises RuntimeError without enable_grad()")
+u_noenable = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device)
+x0 = torch.randn(8, 2, device=device)
+raised = False
+try:
+    stochastic_heun(x0, potential=u_noenable, step=1e-3, iters=5)
+except RuntimeError as e:
+    raised = True
+    print(f"  raised: {e}")
+assert raised, "stochastic_heun() must raise without enable_grad()"
+print("  [OK ] rejected as expected")
+
+# E.5 — chunk statistically matches chunk=1
+section("E.5  chunk statistically matches chunk=1 (aggregate moments)")
+torch.manual_seed(5)
+x0 = u.samples(8000)
+torch.manual_seed(50)
+y1 = stochastic_heun(x0, potential=u, step=5e-3, iters=500, chunk=1)
+torch.manual_seed(50)
+y4 = stochastic_heun(x0, potential=u, step=5e-3, iters=500, chunk=4)
+mean_err = (y1.mean(0) - y4.mean(0)).abs().max().item()
+std_err  = (y1.std(0)  - y4.std(0) ).abs().max().item()
+print(f"  max |mean(chunk=1) - mean(chunk=4)| = {mean_err:.4f}")
+print(f"  max |std (chunk=1) - std (chunk=4)| = {std_err:.4f}")
+# Different RNG consumption order -> different per-particle noise but the same
+# distribution; aggregate moments agree within MC error for N=8000.
+assert mean_err < 0.05, f"chunk moments diverged: mean err {mean_err}"
+assert std_err  < 0.05, f"chunk moments diverged: std err {std_err}"
+print("  [OK ] chunk produces statistically equivalent samples")
 
 
 # ─────────────────────────────────────────────────────────────────

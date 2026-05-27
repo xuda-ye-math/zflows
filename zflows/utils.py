@@ -473,6 +473,71 @@ def langevin(samples: torch.Tensor, potential: Potential, beta: float = 1.0, ste
         out.append(x)
     return torch.cat(out, dim=0)
 
+def stochastic_heun(samples: torch.Tensor, potential: Potential, beta: float = 1.0, step: float = 1e-3, iters: int = 100, chunk: int = 1) -> torch.Tensor:
+    """
+    Overdamped Langevin dynamics targeting exp(-beta * U(x)), integrated with
+    the stochastic Heun (Stratonovich predictor-corrector) scheme instead of
+    the Euler-Maruyama step used by `langevin`.
+
+    For the SDE dtheta = -beta * grad U(theta) dt + sqrt(2) dB, one Heun step
+    reuses a single Wiener increment dW = sqrt(2 * step) * xi (xi ~ N(0, I_d)):
+        predictor:  x~ = x - step * beta * grad U(x) + dW
+        corrector:  x' = x - 0.5 * step * (beta * grad U(x) + beta * grad U(x~)) + dW
+    The drift is evaluated at both ends of the step and averaged (trapezoidal
+    rule), so the noise dW is shared between the two stages -- this is what
+    makes the update Stratonovich-consistent. Since the noise here is additive,
+    Ito and Stratonovich coincide and no extra correction term is needed.
+
+    Versus Euler-Maruyama (`langevin(adjust=False)`): two gradient calls per
+    iteration instead of one, but the trapezoidal drift cancels the leading
+    O(step) drift-discretization error, so the residual bias of this unadjusted
+    scheme shrinks faster as `step -> 0`. It remains an *unadjusted* integrator
+    (no Metropolis correction), so a small step-dependent bias persists; use
+    `langevin(adjust=True)` or `hmc` when you need the exactly-unbiased target.
+
+    Requires `potential.enable_grad()` to have been called so that
+    `potential.grad(x)` is available; otherwise raises RuntimeError. Unlike
+    `langevin(adjust=True)` / `hmc`, no energy evaluations are performed, so
+    `potential.enable_eval()` is not used.
+
+    Input:
+        samples:   Tensor [N, d]   initial particles
+        potential: Potential       target potential U; must support .grad(x)
+        beta:      float           inverse temperature; the stationary
+                                   distribution is exp(-beta * U). Default
+                                   1.0 recovers the standard scheme.
+        step:      float           Heun step size
+        iters:     int             number of Heun steps
+        chunk:     int             split `samples` along dim 0 into this many
+                                   chunks and run the trajectories sequentially.
+                                   Reduces peak GPU memory at the cost of wall
+                                   time. Statistically equivalent to chunk=1
+                                   (each chunk uses its own independent noise);
+                                   set higher only if you hit OOM on the
+                                   whole batch.
+    Output:
+        samples: Tensor [N, d]   particles after `iters` Heun updates
+    """
+    if potential._grad_fn is None:
+        raise RuntimeError(
+            f"stochastic_heun() requires gradients on the potential; "
+            f"call {type(potential).__name__}.enable_grad() before passing it in."
+        )
+    noise_scale = (2.0 * step) ** 0.5
+    out = []
+    for x in torch.chunk(samples, chunk, dim=0):
+        for _ in range(iters):
+            dw = noise_scale * torch.randn_like(x) # shared Wiener increment dW
+            # The `beta *` multiply allocates a fresh tensor each call, so fx
+            # never aliases the CUDA-Graphs buffer behind potential.grad and
+            # survives the second .grad() call without a .clone() (same
+            # convention as hmc's leapfrog / langevin's MALA branch).
+            fx = beta * potential.grad(x) # effective force beta * grad U(x)
+            x_pred = x - step * fx + dw # Euler-Maruyama predictor x~
+            fx_pred = beta * potential.grad(x_pred) # force at the predictor
+            x = x - 0.5 * step * (fx + fx_pred) + dw # Heun corrector (same dW)
+        out.append(x)
+    return torch.cat(out, dim=0)
 
 # ──────────────────────────────────────────────────────────────────────
 # HMC — Hamiltonian Monte Carlo with leapfrog + MH gate
