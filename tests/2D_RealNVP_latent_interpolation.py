@@ -16,10 +16,10 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 torch.manual_seed(0)
 
 # source: standard 2D Gaussian on R^2 (RealNVP lives natively on R^d, no box)
-u0 = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device)
+u_source = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device)
 
 # target: 4-corner Gaussian mixture at (+/-2, +/-2)
-u1 = Gaussian_Mixture(
+u_target = Gaussian_Mixture(
     weights=[1.0, 1.0, 1.0, 1.0],
     mean=[
         [ 2.0,  2.0],
@@ -46,7 +46,7 @@ BATCH: int = 1000 # batch size
 EPOCH: int = 30 # number of epochs
 
 # data-driven: training data are samples from the target distribution
-y = u1.samples(N)
+y = u_target.samples(N)
 optimizer = torch.optim.Adam(flow.parameters(), lr=LR)
 
 for epoch in range(EPOCH):
@@ -57,7 +57,7 @@ for epoch in range(EPOCH):
         idx = perm[start:start + BATCH]
         y_batch = y[idx]
 
-        loss = forward_KL(y_batch, source=u0, F=flow.t())
+        loss = forward_KL(y_batch, source=u_source, F=flow.t())
 
         optimizer.zero_grad()
         loss.backward()
@@ -103,14 +103,14 @@ with torch.no_grad():
 
 # also map all target samples back to latent for the latent-space scatter
 with torch.no_grad():
-    y_grid = u1.samples(N)
+    y_grid = u_target.samples(N)
     z_grid = F.inv(y_grid)
 
 # fresh source and pushforward for the (0, 1) panel
 with torch.no_grad():
-    x_src = u0.samples(N)
+    x_src = u_source.samples(N)
     y_pf, _ = F.call_and_ladj(x_src)
-    y_true = u1.samples(N)
+    y_true = u_target.samples(N)
 
 y_true_np = y_true.cpu().numpy()
 y_pf_np   = y_pf.cpu().numpy()

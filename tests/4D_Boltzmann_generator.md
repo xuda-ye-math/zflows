@@ -23,21 +23,28 @@ U_k(x) = (1 - c_k)\,U_0(x) + c_k\,U_1(x), \qquad k = 0, 1, \dots, M,
 $$
 with $\mu_k \propto \exp(-U_k)$.
 
-**Setup, once before the loop.** Two `Linear_Combination` bridge potentials are constructed up front and reused at every rung:
+**Setup, once at construction time.** The recommended pattern is to opt into the compiled `.grad(x)` / `.eval(x)` fast paths on the two **constituent potentials** — *not* on the `linear_combination`. Each child is compiled once, and any `linear_combination` built from those children **automatically inherits** the fast paths through the combined closure linked at `__init__`:
 
-- `U_prev = Linear_Combination([u_target, u_source])` — denominator in the importance-weight, $U_{k-1}$;
-- `U_curr = Linear_Combination([u_target, u_source])` — numerator in the importance-weight + reverse-KL training target + rejuvenation target, $U_k$.
+```python
+u_source = Gaussian(...).enable_grad().enable_eval()
+u_target = U_target(...).enable_grad().enable_eval()
 
-The hoisted `loss_fn = zflows.loss.loss_compile(reverse_KL, U_curr, F)` then captures the bridge potential `U_curr` *by reference* — when its coefficients are mutated in step (0) below, the same compiled closure reads the new mix on the next forward (Dynamo guards on the Python float values in `U_curr.coeffs` and re-specialises on guard miss; `set_cache_size_limit(32)` gives enough room for all $M = 12$ rung specs). `F = flow.t()` is similarly captured **before the rung loop starts** — the lazy `Transform` machinery re-reads `flow.parameters()` via attribute access on every forward, so updates from `optimizer.step()` propagate without rebuilding `F`. Bridge interpolation between two different potentials is *not* the high-→low-temperature tempering that `loss_compile_beta` is designed for, so `loss_compile` (with default `mode='default'`, no CUDA graph) is the right helper here.
+u_prev = linear_combination([u_target, u_source])  # auto-benefits — no .enable_*() call needed
+u_curr = linear_combination([u_target, u_source])  # auto-benefits — no .enable_*() call needed
+```
+
+`u_prev` is the importance-weight denominator $U_{k-1}$; `u_curr` is the IS numerator + reverse-KL training target + MALA rejuvenation target $U_k$. The combined `_grad_fn` / `_eval_fn` on each `linear_combination` are Python closures `sum_k self.coeffs[k] * U_k.grad(x)` set up by `linear_combination.__init__`; they route into the children's compiled artifacts on every call and read `self.coeffs` fresh, so subsequent `set_coeffs` updates take effect on the next call without any recompile.
+
+The hoisted `loss_fn = zflows.loss.loss_compile(reverse_KL, u_curr, F)` then captures the bridge potential `u_curr` *by reference* — when its coefficients are mutated in step (0) below, the same compiled closure reads the new mix on the next forward (Dynamo guards on the Python float values in `u_curr.coeffs` and re-specialises on guard miss; `set_cache_size_limit(32)` gives enough room for all $M = 12$ rung specs). `F = flow.t()` is similarly captured **before the rung loop starts** — the lazy `Transform` machinery re-reads `flow.parameters()` via attribute access on every forward, so updates from `optimizer.step()` propagate without rebuilding `F`. Bridge interpolation between two different potentials is *not* the high-→low-temperature tempering that `loss_compile_beta` is designed for, so `loss_compile` (with default `mode='default'`, no CUDA graph) is the right helper here.
 
 Each rung then does six things, in order (step 0 retunes the bridge potentials; steps 1–5 are the standard propose → reweight → resample → rejuvenate cycle):
 
-0. **Retune the bridge potentials.** `U_prev.set_coeffs([c_p, 1 - c_p])` and `U_curr.set_coeffs([c_k, 1 - c_k], enable_grad=True, enable_eval=True)`. `set_coeffs` overwrites `self.coeffs` in place as a plain `list[float]` *and* drops the previous rung's compiled `.grad(x)` / `.eval(x)` fast paths so they cannot return stale-coefficient values; the two flags then rebuild both compiled paths against the new mix in the same call, so MALA in step (4) sees a freshly specialised gradient and energy. `U_prev` is only consumed by `importance_weights_log` through its plain forward, so its fast paths are deliberately left off.
+0. **Retune the bridge potentials.** `u_prev.set_coeffs([c_p, 1 - c_p])` and `u_curr.set_coeffs([c_k, 1 - c_k])` — *plain coefficient updates*, no flags, no `.enable_*()` calls. `set_coeffs` overwrites `self.coeffs` in place as a `list[float]` and the `__init__`-linked closures read it fresh on the next `.grad(x)` / `.eval(x)` call. Each child's `vmap(grad(forward))` and `compile(forward)` were paid for **exactly once** when `.enable_grad().enable_eval()` was chained on `u_source` / `u_target` at construction time, and are reused unchanged across all $M$ rungs — there is no per-rung recompile.
 1. **Resample.** Draw a working set $x_{\mathrm{train}, k-1}$ of size $N_{\mathrm{train}}$ uniformly with replacement from the previous rung's particle cloud $x_{\mathrm{valid}, k-1} \sim \mu_{k-1}$.
-2. **Train.** Update the *single* shared flow to minimize reverse KL from $\mu_{k-1}$ to $\mu_k$, treating $x_{\mathrm{train}, k-1}$ as samples from the source. The $U_{k-1}(x)$ term is parameter-independent and drops out of the gradient, so reverse KL against $U_k$ alone is the correct loss — and since $U_k$ is literally `U_curr` (the linear combination we just retuned), the hoisted `loss_fn(x_batch)` is the entire training step. The first batch of the *first* rung pays a one-time `torch.compile` cost (Dynamo trace + Inductor lowering); the first batch of every subsequent rung pays only a partial retrace (the new `U_curr.coeffs` floats fail the cached guards) before falling back into the fused-kernel fast path. After the first batch of each rung, per-step training time drops sharply.
-3. **Importance sample.** Push the full validation set $x_{\mathrm{valid}, k-1}$ through $F$ to get proposals $y$ and log-weights $\log w = -U_k(y) + U_{k-1}(x_{\mathrm{valid}, k-1}) + \log|\det J_F|$ via `importance_weights_log(samples, source=U_prev, target=U_curr, F=flow.t())`. Report the ESS as a self-test for this rung.
+2. **Train.** Update the *single* shared flow to minimize reverse KL from $\mu_{k-1}$ to $\mu_k$, treating $x_{\mathrm{train}, k-1}$ as samples from the source. The $U_{k-1}(x)$ term is parameter-independent and drops out of the gradient, so reverse KL against $U_k$ alone is the correct loss — and since $U_k$ is literally `u_curr` (the linear combination we just retuned), the hoisted `loss_fn(x_batch)` is the entire training step. The first batch of the *first* rung pays a one-time `torch.compile` cost (Dynamo trace + Inductor lowering); the first batch of every subsequent rung pays only a partial retrace (the new `u_curr.coeffs` floats fail the cached guards) before falling back into the fused-kernel fast path. After the first batch of each rung, per-step training time drops sharply.
+3. **Importance sample.** Push the full validation set $x_{\mathrm{valid}, k-1}$ through $F$ to get proposals $y$ and log-weights $\log w = -U_k(y) + U_{k-1}(x_{\mathrm{valid}, k-1}) + \log|\det J_F|$ via `importance_weights_log(samples, source=u_prev, target=u_curr, F=flow.t())`. Report the ESS as a self-test for this rung.
 4. **Resample by weight.** Multinomial draw to convert the weighted cloud into an equally-weighted cloud $\tilde y$.
-5. **Rejuvenate.** Run MALA (Metropolis-adjusted Langevin) against $U_k$ to break duplicate particles and remove residual proposal bias. The compiled fast paths needed here — `U_curr.grad(x)` for the gradient $\nabla U_k$ in the Langevin proposal, and `U_curr.eval(x)` for the energy $U_k$ in the accept/reject step — were already rebuilt at the top of the rung by `set_coeffs(enable_grad=True, enable_eval=True)`, so each MALA iteration is two fused kernel calls instead of two autograd-graph rebuilds. Output $x_{\mathrm{valid}, k}$ for the next rung.
+5. **Rejuvenate.** Run MALA (Metropolis-adjusted Langevin) against $U_k$ to break duplicate particles and remove residual proposal bias. The compiled fast paths needed here — `u_curr.grad(x)` for the gradient $\nabla U_k$ in the Langevin proposal, and `u_curr.eval(x)` for the energy $U_k$ in the accept/reject step — route through the `__init__`-linked combined closure, which calls each child's compiled `.grad` / `.eval` (compiled once on `u_source` / `u_target` at the very top of the script) and sums them with the current `self.coeffs`. Each MALA iteration is therefore two fused kernel calls per child plus a Python-level weighted sum, instead of two autograd-graph rebuilds. Output $x_{\mathrm{valid}, k}$ for the next rung.
 
 Only the validation cloud $x_{\mathrm{valid}, k}$ is carried across rungs; the optimizer state is re-used so the flow warm-starts each step.
 
@@ -60,15 +67,15 @@ python -m tests.4D_Boltzmann_generator
 Pointers into the script:
 
 - imports + `suppress_warnings` / `set_cache_size_limit(32)`: [`4D_Boltzmann_generator.py:1–18`](4D_Boltzmann_generator.py#L1-L18)
-- source (4D Gaussian) and target ($U_1$ class): [`4D_Boltzmann_generator.py:21–55`](4D_Boltzmann_generator.py#L21-L55)
-- `.pth` cache: training is skipped on subsequent runs by loading `4D_Boltzmann_generator.pth`: [`4D_Boltzmann_generator.py:57–63`](4D_Boltzmann_generator.py#L57-L63)
-- training branch — flow init, validation cloud, ladder $c_k$: [`4D_Boltzmann_generator.py:65–93`](4D_Boltzmann_generator.py#L65-L93)
-- captured `F = flow.t()` (reused across rungs): [`4D_Boltzmann_generator.py:95–100`](4D_Boltzmann_generator.py#L95-L100)
-- `U_prev` / `U_curr` bridge potentials built once + hoisted `loss_fn = loss_compile(reverse_KL, U_curr, F)`: [`4D_Boltzmann_generator.py:102–120`](4D_Boltzmann_generator.py#L102-L120)
-- per-rung loop (6 steps: `set_coeffs` retune → resample → train → IS → resample → MALA): [`4D_Boltzmann_generator.py:122–180`](4D_Boltzmann_generator.py#L122-L180)
-- saving the cache: [`4D_Boltzmann_generator.py:182–188`](4D_Boltzmann_generator.py#L182-L188)
-- ESS history printout: [`4D_Boltzmann_generator.py:190–194`](4D_Boltzmann_generator.py#L190-L194)
-- two-row visualization (Cartesian + polar): [`4D_Boltzmann_generator.py:196–246`](4D_Boltzmann_generator.py#L196-L246)
+- source (4D Gaussian) and target ($U_1$ class), both `.enable_grad().enable_eval()`-chained at construction: [`4D_Boltzmann_generator.py:21–59`](4D_Boltzmann_generator.py#L21-L59)
+- `.pth` cache: training is skipped on subsequent runs by loading `4D_Boltzmann_generator.pth`: [`4D_Boltzmann_generator.py:61–67`](4D_Boltzmann_generator.py#L61-L67)
+- training branch — flow init, validation cloud, ladder $c_k$: [`4D_Boltzmann_generator.py:69–97`](4D_Boltzmann_generator.py#L69-L97)
+- captured `F = flow.t()` (reused across rungs): [`4D_Boltzmann_generator.py:99–104`](4D_Boltzmann_generator.py#L99-L104)
+- `u_prev` / `u_curr` bridge potentials built once (auto-benefit from pre-enabled children) + hoisted `loss_fn = loss_compile(reverse_KL, u_curr, F)`: [`4D_Boltzmann_generator.py:106–126`](4D_Boltzmann_generator.py#L106-L126)
+- per-rung loop (6 steps: `set_coeffs` retune → resample → train → IS → resample → MALA): [`4D_Boltzmann_generator.py:128–185`](4D_Boltzmann_generator.py#L128-L185)
+- saving the cache: [`4D_Boltzmann_generator.py:187–193`](4D_Boltzmann_generator.py#L187-L193)
+- ESS history printout: [`4D_Boltzmann_generator.py:195–199`](4D_Boltzmann_generator.py#L195-L199)
+- two-row visualization (Cartesian + polar): [`4D_Boltzmann_generator.py:201–267`](4D_Boltzmann_generator.py#L201-L267)
 
 The first invocation runs the annealing ($M = 12$ rungs of training + IS + MALA) and saves a `.pth` cache containing `x_valid_history` (M+1 snapshots) and `ess_history` (M floats). Subsequent invocations load the cache and skip directly to the visualization.
 
@@ -98,14 +105,14 @@ The figure below plots the validation particles at $k = 0, 4, 8, 12$ in two rows
 
 | $k$ | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| ESS | 0.78 | 0.78 | 0.92 | 0.96 | 0.97 | 0.97 | 0.96 | 0.97 | 0.96 | 0.97 | 0.96 | 0.97 |
+| ESS | 0.68 | 0.96 | 0.96 | 0.96 | 0.96 | 0.96 | 0.96 | 0.96 | 0.97 | 0.97 | 0.97 | 0.96 |
 
-The first two rungs sit at $\sim 0.78$ — the flow is still discovering the rotational symmetry while the bridge potential is mostly the Gaussian source — then a single jump to $\sim 0.92$ at $k=3$ once the Coulomb term starts mattering, and a plateau in the $0.96$–$0.97$ band from $k=4$ onward. Each rung shifts the distribution by a small enough amount that the flow's pushforward is a usable proposal, even though the *cumulative* shift from $\mu_0$ to $\mu_M$ would have ESS $\approx 0$ as a single-shot proposal. That's the entire point of the annealed schedule.
+The first rung sits at $\sim 0.68$ — the flow starts at the identity bijection and is meeting the Coulomb-tilted bridge $U_1 = \frac{11}{12} U_0 + \frac{1}{12} U_1$ for the first time, so the pushforward is only roughly aligned with $\mu_1$. From $k = 2$ onward, ESS jumps straight to the $0.96$–$0.97$ band and holds there for the remaining ten rungs: each successive shift is small relative to the bridge already absorbed into the flow's parameters. The cumulative shift from $\mu_0$ to $\mu_M$ would have ESS $\approx 0$ as a single-shot proposal — that's the entire point of the annealed schedule.
 
 **What this test demonstrates about `zflows`.** This is the smallest example that exercises every component end-to-end:
 
-- `Linear_Combination` builds the two bridge potentials *once* outside the loop; `set_coeffs([c_k, 1 - c_k], enable_grad=True, enable_eval=True)` then retunes the mix in place each rung, dropping the previous rung's compiled fast paths and rebuilding them against the new coefficients in a single call — so the same Python object survives all $M = 12$ rungs without leaking a fresh compile artifact per step;
-- the built-in `reverse_KL` is the per-rung loss applied directly to the combined potential `U_curr` (the source-energy term drops out of the gradient automatically), and `zflows.loss.loss_compile(reverse_KL, U_curr, F)` is **hoisted outside the loop** so a single closure handles every rung — Dynamo respecialises on `U_curr.coeffs` guard misses, which fits comfortably under the `set_cache_size_limit(32)` ceiling;
+- the recommended `linear_combination` pattern, exhibited here: chain `.enable_grad().enable_eval()` on each **constituent potential** (`u_source`, `u_target`) at construction time, then build `linear_combination([u_target, u_source])` and let the combined `.grad(x)` / `.eval(x)` — Python closures $\sum_k c_k \, \nabla U_k(x)$ linked at `linear_combination.__init__` — auto-route into the children's compiled fast paths. Two bridge potentials are constructed *once* outside the loop and `set_coeffs([c_k, 1 - c_k])` retunes the mix in place each rung as a **pure coefficient update**: no compiled artifact is invalidated, no recompile is triggered, and the children's compiled `.grad` / `.eval` are paid for exactly once for the whole anneal;
+- the built-in `reverse_KL` is the per-rung loss applied directly to the combined potential `u_curr` (the source-energy term drops out of the gradient automatically), and `zflows.loss.loss_compile(reverse_KL, u_curr, F)` is **hoisted outside the loop** so a single closure handles every rung — Dynamo respecialises on `u_curr.coeffs` guard misses, which fits comfortably under the `set_cache_size_limit(32)` ceiling;
 - `importance_weights_log` is the one-call IS reweighting against the just-trained flow, ready to feed into `compute_ESS_log` for the per-rung diagnostic;
 - `resample` converts weighted clouds to equal-weight ones for the next rung;
 - `Potential.enable_grad()` / `.enable_eval()` provide the compiled gradient and forward fast paths that MALA (`rejuvenation` with `adjust=True`) uses for the proposal and the accept/reject step respectively — invoked via `set_coeffs(enable_*=True)` at the top of each rung;

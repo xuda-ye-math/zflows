@@ -15,7 +15,7 @@ $$
 \mu_1(y) \propto \sum_{k=1}^{3} w_k \, \mathcal N\bigl(y \,\big|\, m_k, \mathrm{diag}(\sigma_k^2)\bigr), \qquad \{w_k\} = (1,1,1).
 $$
 
-Note that the *training loop never calls* `u1.forward(...)`; only `u1.samples(N)` is used, mimicking a true data-driven setup.
+Note that the *training loop never calls* `u_target.forward(...)`; only `u_target.samples(N)` is used, mimicking a true data-driven setup.
 
 ### Forward-$\mathrm{KL}$ objective
 

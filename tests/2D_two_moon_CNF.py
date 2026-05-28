@@ -13,7 +13,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 torch.manual_seed(0)
 
 # source: standard 2D Gaussian on R^2 (CNF lives on R^d, no box needed)
-u0 = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device)
+u_source = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device)
 
 # target: two-moons distribution, centered and rescaled to roughly fill [-2, 2]^2
 def two_moons_samples(N: int, noise: float = 0.1) -> torch.Tensor:
@@ -49,7 +49,7 @@ for epoch in range(EPOCH):
         idx = perm[start:start + BATCH]
         y_batch = y[idx]
 
-        loss = forward_KL(y_batch, source=u0, F=flow.t())
+        loss = forward_KL(y_batch, source=u_source, F=flow.t())
 
         optimizer.zero_grad()
         loss.backward()
@@ -66,7 +66,7 @@ for epoch in range(EPOCH):
 import matplotlib.pyplot as plt
 
 with torch.no_grad():
-    x_plot = u0.samples(N) # fresh samples from source
+    x_plot = u_source.samples(N) # fresh samples from source
     y_pf, _ = flow.t().call_and_ladj(x_plot) # pushforward F(x)
     y_true = two_moons_samples(N, noise=0.1) # fresh samples from target (ground truth)
 

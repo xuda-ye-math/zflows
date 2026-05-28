@@ -44,53 +44,57 @@ Swapping flow classes is a one-line change. Every class also exposes `flow.zeros
 ```python
 from zflows.potential import Potential
 
-class U(Potential): # any user-defined energy
+class MyPotential(Potential): # any user-defined energy
     def __init__(self, ...): # any constructor args you need (physical constants, hyperparams, sub-modules, ...)
         super().__init__()
         ...
-    def forward(self, x: torch.Tensor) -> torch.Tensor: # U(x): Tensor [N, d] -> Tensor [N]
+    def forward(self, x: torch.Tensor) -> torch.Tensor: # Tensor [N, d] -> Tensor [N]
         return ...
+
+u = MyPotential().to(device)   # create an instance; `u(x)` then works as the standard forward call.
 ```
 
 The `def __init__(self): super().__init__()` boilerplate is **always recommended**, even when you have no extra state to initialize — skipping it leaves `nn.Module`'s internals uncreated and the next call `u(x)` fails with a cryptic `AttributeError`.
 
-If there are no constructor args and no extra state to worry about, `potential_from(...)` writes the subclass boilerplate for you from a plain `(x) -> Tensor` callable. It returns the *class*, so you instantiate it the same way you would `Gaussian(...)`:
+If there are no constructor args and no extra state to worry about, `potential_from(...)` writes the subclass boilerplate for you from a plain `(x) -> Tensor` callable and returns a ready-to-use *instance* — no manual instantiation needed:
 
 ```python
 from zflows.potential import potential_from
 
-def U_fn(x: torch.Tensor) -> torch.Tensor: # U(x): Tensor [N, d] -> Tensor [N]
+def myforward(x: torch.Tensor) -> torch.Tensor: # Tensor [N, d] -> Tensor [N]
     return ...
 
-U = potential_from(U_fn)   # class — equivalent to writing the subclass by hand
-u = U().to(device)         # instance — full toolchain still works
+u = potential_from(myforward).to(device)   # create an instance; `u(x)` then works as the myforward call.
 ```
 
-For a single instance in one line, use `potential_instance_from(U_fn).to(device)`. For potentials that carry state — physical constants, learnable sub-modules, etc. — subclass `Potential` directly as above.
+For potentials that carry state — physical constants, learnable sub-modules, etc. — subclass `Potential` directly as above.
 
-For Boltzmann-generator bridges and richer multi-rung mixtures, `Linear_Combination` composes any number of `Potential` instances into a single `U(x) = Σ_k c_k U_k(x)`, evaluated as one chained sum rather than nested compositions. Coefficients are stored as a plain `list[float]`; the constructor also accepts a 1-d tensor or `None` (uniform 1/N default):
+For Boltzmann-generator bridges and richer multi-rung mixtures, `linear_combination` composes any number of `Potential` **instances** (not classes) into a single `U(x) = Σ_k c_k U_k(x)`, evaluated as one chained sum rather than nested compositions. Coefficients are stored as a plain `list[float]`; the constructor also accepts a 1-d tensor:
 
 ```python
-from zflows.potential import Linear_Combination
+from zflows.potential import linear_combination
 
-U = Linear_Combination([U0, U1, ...], [c0, c1, ...])
-U_uniform = Linear_Combination([U0, U1, ...])           # coeffs default to [1/N] * N
+# u0, u1, ... are Potential instances (e.g. `Gaussian(...)`, `MyPotential(...)`).
+u = linear_combination([u0, u1, ...], [c0, c1, ...])
 ```
 
-For annealed bridges, build the `Linear_Combination` once and **retune its coefficients in place with `set_coeffs`** — no per-rung re-instantiation, no compiled-fast-path leak. Pass `enable_grad=True` / `enable_eval=True` to drop the previous rung's compiled `.grad(x)` / `.eval(x)` artifacts and rebuild them against the new mix in the same call (used to feed MALA / HMC at each rung):
+**Auto-compiled gradient feature.** Opt-in to a `torch.compile`-compiled `vmap(grad(u))` with a single chainable call on any `Potential` instance:
 
 ```python
-U.set_coeffs([c0_new, c1_new], enable_grad=True, enable_eval=True)
-```
-
-Precompiled gradients on `Potential`: opt-in to a `torch.compile`-compiled `vmap(grad(u))` with a single chainable call.
-
-```python
-u = U().to(device).enable_grad()
+u = MyPotential().to(device).enable_grad()
 g = u.grad(x) # x: [N, d] -> g: [N, d], no requires_grad_ on x needed
 ```
 
 The gradient closure is built once, cached on the instance, and reused every call — making heavy-load Langevin / MALA sampling fast (one fused kernel per step instead of an autograd graph rebuild). The call is idempotent and chainable; calling `.grad()` without `.enable_grad()` raises a clear `RuntimeError`.
+
+`linear_combination` inherits this automatically: enable `.grad(x)` on the constituent potential instances `u0` and `u1`, and the `linear_combination` built from them inherits that fast path through a Python closure $\sum_k c_k\, \nabla U_k(x)$ linked at construction. No `u.enable_grad()` call on the combination is needed:
+
+```python
+u0 = Gaussian(...).enable_grad()       # instance, not class
+u1 = MyPotential(...).enable_grad()    # instance, not class
+
+u = linear_combination([u0, u1], [0.2, 0.8])   # instance; u.grad(x) works immediately
+```
 
 **One-line compilable KL losses.** `reverse_KL(x, target, F)` and `forward_KL(y, source, F)` are direct-call functions returning a scalar loss. For heavy-load training (e.g. annealed Boltzmann generators with thousands of steps per bridge) wrap the loss once with `loss_compile(...)` to capture `(potential, transform)` as closure constants and fuse the forward into a CUDA graph — typically **4–10× faster per training step** ([benchmark](tests/compare_compiled_loss.md)):
 
@@ -347,21 +351,21 @@ Result on an RTX 5070 Ti (committed [`tests/compare_compiled_loss.csv`](tests/co
 
 | dimension | hidden_features | raw ms | default ms | reduce ms | speedup default | speedup reduce |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-|  2 | (64, 64)   |  5.65 | 1.38 | 0.54 |  4.10 | 10.42 |
-|  2 | (128, 128) |  5.42 | 1.37 | 0.55 |  3.96 |  9.92 |
-|  2 | (256, 256) |  5.50 | 1.25 | 0.61 |  4.40 |  8.99 |
-|  4 | (64, 64)   |  5.43 | 1.38 | 0.55 |  3.92 |  9.89 |
-|  4 | (128, 128) |  5.47 | 1.38 | 0.55 |  3.96 | 10.03 |
-|  4 | (256, 256) |  5.48 | 1.39 | 0.73 |  3.95 |  7.51 |
-|  8 | (64, 64)   |  5.66 | 1.30 | 0.46 |  4.36 | 12.19 |
-|  8 | (128, 128) |  6.03 | 1.29 | 0.58 |  4.66 | 10.42 |
-|  8 | (256, 256) |  6.01 | 1.34 | 0.85 |  4.48 |  7.08 |
-| 16 | (64, 64)   |  6.82 | 1.35 | 0.65 |  5.04 | 10.42 |
-| 16 | (128, 128) |  6.93 | 1.39 | 0.80 |  4.98 |  8.61 |
-| 16 | (256, 256) |  7.23 | 1.39 | 1.10 |  5.21 |  6.57 |
-| 32 | (64, 64)   | 12.18 | 1.38 | 1.04 |  8.83 | 11.77 |
-| 32 | (128, 128) | 12.74 | 1.40 | 1.28 |  9.12 |  9.99 |
-| 32 | (256, 256) | 13.40 | 1.78 | 1.80 |  7.55 |  7.46 |
+|  2 | (64, 64)   |  6.03 | 1.41 | 0.50 |  4.30 | 12.18 |
+|  2 | (128, 128) |  5.90 | 1.44 | 0.51 |  4.09 | 11.66 |
+|  2 | (256, 256) |  6.31 | 1.61 | 0.65 |  3.93 |  9.72 |
+|  4 | (64, 64)   |  6.28 | 1.52 | 0.56 |  4.12 | 11.24 |
+|  4 | (128, 128) |  5.68 | 1.44 | 0.52 |  3.95 | 10.92 |
+|  4 | (256, 256) |  5.63 | 1.42 | 0.73 |  3.96 |  7.67 |
+|  8 | (64, 64)   |  5.38 | 1.46 | 0.56 |  3.69 |  9.68 |
+|  8 | (128, 128) |  5.91 | 1.44 | 0.63 |  4.10 |  9.45 |
+|  8 | (256, 256) |  6.16 | 1.42 | 0.91 |  4.33 |  6.73 |
+| 16 | (64, 64)   |  7.56 | 1.49 | 0.68 |  5.08 | 11.12 |
+| 16 | (128, 128) |  7.84 | 1.33 | 0.80 |  5.90 |  9.80 |
+| 16 | (256, 256) |  7.50 | 1.34 | 1.09 |  5.60 |  6.86 |
+| 32 | (64, 64)   | 12.16 | 1.31 | 1.12 |  9.26 | 10.91 |
+| 32 | (128, 128) | 12.59 | 1.42 | 1.35 |  8.89 |  9.31 |
+| 32 | (256, 256) | 12.76 | 1.67 | 1.65 |  7.64 |  7.71 |
 
 </div>
 
@@ -385,7 +389,7 @@ python -m tests.3D_periodic
 <details open>
 <summary><strong>5. Annealed Boltzmann generator (4D, two repelling charges)</strong></summary>
 
-[`tests/4D_Boltzmann_generator.py`](tests/4D_Boltzmann_generator.py) (writeup: [`tests/4D_Boltzmann_generator.md`](tests/4D_Boltzmann_generator.md)) trains an `NSF` on the 4D target of two charges in $\mathbb R^2$ confined to a soft annulus and repelling via a regularized 3D Coulomb. A direct flow proposal would have $\mathrm{ESS} \approx 0$, so we anneal: stand up two `Linear_Combination` bridge potentials *once* (the IS denominator $U_{k-1}$ and the training / IS-numerator / MALA target $U_k$) and retune their coefficients at every rung via `set_coeffs([c, 1-c], enable_grad=True, enable_eval=True)` — one Python object survives all $M{=}12$ rungs, the compiled `.grad(x)` / `.eval(x)` fast paths get rebuilt against the new mix on each retune, and a single hoisted `loss_compile(reverse_KL, U_curr, F)` handles the per-rung reverse-KL training without per-rung re-instantiation. Each rung runs *resample → reverse KL train → IS → resample → MALA rejuvenation*, with the same flow warm-started across rungs. The figure shows the marginal annulus forming (top row) and the joint relative-angle distribution $\Delta\theta = \theta_2 - \theta_1$ on $S^1$ shifting from uniform at $k=0$ to peaked at $\pm\pi$ at $k=12$ — the antipodal Coulomb minimum.
+[`tests/4D_Boltzmann_generator.py`](tests/4D_Boltzmann_generator.py) (writeup: [`tests/4D_Boltzmann_generator.md`](tests/4D_Boltzmann_generator.md)) trains an `NSF` on the 4D target of two charges in $\mathbb R^2$ confined to a soft annulus and repelling via a regularized 3D Coulomb. A direct flow proposal would have $\mathrm{ESS} \approx 0$, so we anneal: chain `.enable_grad()` on **each constituent potential** ($u_{\mathrm{source}}$ and $u_{\mathrm{target}}$) at the very top of the script, build two `linear_combination` bridge potentials *once* (the IS denominator $U_{k-1}$ and the training / IS-numerator / MALA target $U_k$ — both auto-inherit the compiled gradient fast path through their `__init__`-linked closures), and retune coefficients per rung via plain `set_coeffs([c, 1-c])`. The children's compiled `.grad` is paid for **exactly once** at construction time and reused unchanged across all $M{=}12$ rungs. A single hoisted `loss_compile(reverse_KL, u_curr, F)` handles the per-rung reverse-KL training without per-rung re-instantiation. Each rung runs *resample → reverse KL train → IS → resample → MALA rejuvenation*, with the same flow warm-started across rungs. ESS climbs from $0.68$ at $k=1$ straight to a $0.96$–$0.97$ plateau by $k=2$ and stays there for the remaining ten rungs. The figure shows the marginal annulus forming (top row) and the joint relative-angle distribution $\Delta\theta = \theta_2 - \theta_1$ on $S^1$ shifting from uniform at $k=0$ to peaked at $\pm\pi$ at $k=12$ — the antipodal Coulomb minimum.
 
 ```bash
 python -m tests.4D_Boltzmann_generator
@@ -452,7 +456,7 @@ python -m tests.multi_well_compare
 
 **Linux + NVIDIA GPU is required.** The package has been tested on **Ubuntu**, **Arch**, and **WSL** (Windows Subsystem for Linux); other major Linux distributions should work as well as long as a CUDA-enabled PyTorch build is available.
 
-Native Windows is **not** supported: `torch.compile` — the backbone of `Potential.enable_grad`, `Potential.enable_eval`, **and `loss_compile` / `loss_compile_beta`** — does not run on Windows, see [pytorch/pytorch#167062](https://github.com/pytorch/pytorch/issues/167062). On Windows machines, either use [WSL](https://github.com/microsoft/WSL) (recommended) or avoid every compile entry point: skip `enable_grad` / `enable_eval` (fall back to standard autograd for `Potential` gradients) and skip `loss_compile` / `loss_compile_beta` (call `reverse_KL(x, target, flow.t())` raw in your training loop instead). The un-compiled paths are slower but functionally equivalent — every numerical result the test suite produces is identical with or without compile.
+Native Windows is **not** supported: `torch.compile` — the backbone of `Potential.enable_grad` **and `loss_compile` / `loss_compile_beta`** — does not run on Windows, see [pytorch/pytorch#167062](https://github.com/pytorch/pytorch/issues/167062). On Windows machines, either use [WSL](https://github.com/microsoft/WSL) (recommended) or avoid every compile entry point: skip `enable_grad` (fall back to standard autograd for `Potential` gradients) and skip `loss_compile` / `loss_compile_beta` (call `reverse_KL(x, target, flow.t())` raw in your training loop instead). The un-compiled paths are slower but functionally equivalent — every numerical result the test suite produces is identical with or without compile.
 
 macOS is untested. The pure-Python flow / loss code should import and run on the CPU, but the compiled fast paths target CUDA and have not been exercised on Apple Silicon.
 
@@ -474,7 +478,7 @@ True
 
 It runs three checks: (1) OS is Linux — non-Linux emits a warning but doesn't fail; (2) `nvcc` is reachable — `shutil.which("nvcc")` first, then the Ubuntu default install locations `/usr/local/cuda/bin/nvcc` and `/usr/local/cuda-*/bin/nvcc` as fallbacks; warns if none match; (3) **the authoritative step**: actually `torch.compile`'s a small probe function under the same `mode='reduce-overhead'` zflows uses internally, and returns `True` iff that succeeds.
 
-The first two checks are warnings only; the bool return value reflects only the sanity test. Failure on (2) is the most common cause of the "C compiler not found" / "`nvcc` not found" errors that surface on the first call to `Potential.enable_grad` / `Potential.enable_eval` / `loss_compile` / `loss_compile_beta`: `torch.compile` invokes Triton / TorchInductor, which JIT-compiles a small CUDA helper at first call, and that step needs the NVIDIA C/C++ compiler `nvcc` from the **CUDA Toolkit** (not just the CUDA runtime that ships with the PyTorch wheel). Install the toolkit through your distro's package manager or from [NVIDIA's downloads page](https://developer.nvidia.com/cuda-downloads); if the toolkit lives at the Ubuntu default `/usr/local/cuda/bin/nvcc` or `/usr/local/cuda-X.Y/bin/nvcc` the fallback picks it up automatically, otherwise add it to `$PATH` and re-run `check_compile_available()`.
+The first two checks are warnings only; the bool return value reflects only the sanity test. Failure on (2) is the most common cause of the "C compiler not found" / "`nvcc` not found" errors that surface on the first call to `Potential.enable_grad` / `loss_compile` / `loss_compile_beta`: `torch.compile` invokes Triton / TorchInductor, which JIT-compiles a small CUDA helper at first call, and that step needs the NVIDIA C/C++ compiler `nvcc` from the **CUDA Toolkit** (not just the CUDA runtime that ships with the PyTorch wheel). Install the toolkit through your distro's package manager or from [NVIDIA's downloads page](https://developer.nvidia.com/cuda-downloads); if the toolkit lives at the Ubuntu default `/usr/local/cuda/bin/nvcc` or `/usr/local/cuda-X.Y/bin/nvcc` the fallback picks it up automatically, otherwise add it to `$PATH` and re-run `check_compile_available()`.
 
 </details>
 
@@ -495,7 +499,7 @@ This is the single entry point that turns off **all four orthogonal layers of no
 3. **Triton autotune stderr** — the per-kernel `AUTOTUNE addmm(...)` banners that Triton's C-side autotuner writes directly to stderr (Python's `warnings` filter can't catch these) — silenced via `TRITON_PRINT_AUTOTUNING=0`.
 4. **Inductor compile-worker interleaving** — the `_POSIX_C_SOURCE redefined` warnings emitted by GCC for every kernel autotuned, plus other gcc/nvcc diagnostics — serialised to one worker via `TORCHINDUCTOR_COMPILE_THREADS=1`, so any remaining diagnostic comes out cleanly instead of as interleaved gibberish across N workers.
 
-These layers are orthogonal: Python warning filters don't catch stderr writes from Triton's C side, and `torch._logging` doesn't catch GCC diagnostics. `suppress_warnings()` covers all four; the env-var-based pieces (#3 and #4) only take effect for *future* compiles, so call this before any `torch.compile` / `Potential.enable_grad` / `Potential.enable_eval` / `loss_compile` / `loss_compile_beta` invocation.
+These layers are orthogonal: Python warning filters don't catch stderr writes from Triton's C side, and `torch._logging` doesn't catch GCC diagnostics. `suppress_warnings()` covers all four; the env-var-based pieces (#3 and #4) only take effect for *future* compiles, so call this before any `torch.compile` / `Potential.enable_grad` / `loss_compile` / `loss_compile_beta` invocation.
 
 The function is idempotent and safe to call multiple times. Real compile *failures* still raise — only routine noise is muted. You can see it in action at the top of every test script in [`tests/`](tests/) (e.g. [`tests/3D_periodic.py`](tests/3D_periodic.py), [`tests/_verify_utils.py`](tests/_verify_utils.py)).
 
@@ -546,7 +550,7 @@ If you need conditional flows, use [zuko](https://github.com/probabilists/zuko) 
 
 Neither is a drop-in replacement for the energy-based sampling / Boltzmann-generator pipeline `zflows` is built around — both target the SBI / density-estimation use cases — so expect to assemble the *propose → reweight → resample → rejuvenate* loop yourself out of their primitives.
 
-On raw speed: with `torch.compile` in the training loop (via `loss_compile` / `loss_compile_beta` / `Potential.enable_grad` / `Potential.enable_eval`), the per-step gap between JAX and PyTorch is typically minor. What PyTorch still gives you for free is a natural OOP layout centered on `nn.Module` — `Flow`, `Potential`, and their subclasses all inherit from it, so `.to(device)`, `.parameters()`, `.state_dict()`, and `optimizer.step()` work without extra plumbing. JAX has no equivalent default and routes parameters explicitly. Random number generation is similar: PyTorch's global `torch.manual_seed(...)` is sufficient for the Langevin / MALA / HMC routines in `zflows.utils`, while JAX requires you to thread a `PRNGKey` through every sampler call.
+On raw speed: with `torch.compile` in the training loop (via `loss_compile` / `loss_compile_beta` / `Potential.enable_grad`), the per-step gap between JAX and PyTorch is typically minor. What PyTorch still gives you for free is a natural OOP layout centered on `nn.Module` — `Flow`, `Potential`, and their subclasses all inherit from it, so `.to(device)`, `.parameters()`, `.state_dict()`, and `optimizer.step()` work without extra plumbing. JAX has no equivalent default and routes parameters explicitly. Random number generation is similar: PyTorch's global `torch.manual_seed(...)` is sufficient for the Langevin / MALA / HMC routines in `zflows.utils`, while JAX requires you to thread a `PRNGKey` through every sampler call.
 
 </details>
 

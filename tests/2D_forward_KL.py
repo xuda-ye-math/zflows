@@ -13,10 +13,10 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 torch.manual_seed(0)
 
 # source: standard Gaussian
-u0 = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device)
+u_source = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device)
 
 # target: 3-mode diagonal Gaussian mixture on an equilateral triangle
-u1 = Gaussian_Mixture(
+u_target = Gaussian_Mixture(
     weights=[1.0, 1.0, 1.0],
     mean=[
         [ 2.0,  0.0],
@@ -40,7 +40,7 @@ BATCH: int = 1000 # batch size
 EPOCH: int = 20 # number of epochs
 
 # data-driven: training data are samples from the target distribution
-y = u1.samples(N)
+y = u_target.samples(N)
 optimizer = torch.optim.Adam(flow.parameters(), lr=LR)
 
 for epoch in range(EPOCH):
@@ -51,7 +51,7 @@ for epoch in range(EPOCH):
         idx = perm[start:start + BATCH]
         y_batch = y[idx]
 
-        loss = forward_KL(y_batch, source=u0, F=flow.t())
+        loss = forward_KL(y_batch, source=u_source, F=flow.t())
 
         optimizer.zero_grad()
         loss.backward()
@@ -67,9 +67,9 @@ for epoch in range(EPOCH):
 import matplotlib.pyplot as plt
 
 with torch.no_grad():
-    x_plot = u0.samples(N) # fresh samples from source
+    x_plot = u_source.samples(N) # fresh samples from source
     y_pf, _ = flow.t().call_and_ladj(x_plot) # pushforward F(x)
-    y_true = u1.samples(N) # fresh samples from target (ground truth)
+    y_true = u_target.samples(N) # fresh samples from target (ground truth)
 
 x_np = x_plot.cpu().numpy()
 y_pf_np = y_pf.cpu().numpy()

@@ -14,7 +14,7 @@ $$
 \mathcal L_{\mathrm{forward}}[F] = \mathbb E_{y \sim \mu_1} \bigl[\, U_0(F^{-1}(y)) + \log |\det J_F(F^{-1}(y))| \,\bigr],
 $$
 
-where $\mu_1$ is the empirical two-moons distribution and $U_0(x) = \frac{1}{2}|x|^2$ is the Gaussian source potential. Concretely the loop calls `forward_KL(y_batch, source=u0, F=flow.t())`, which evaluates $F^{-1}$ and $\log|\det J_{F^{-1}}|$ in one ODE integration via `flow.t().inv.call_and_ladj(y_batch)`.
+where $\mu_1$ is the empirical two-moons distribution and $U_0(x) = \frac{1}{2}|x|^2$ is the Gaussian source potential. Concretely the loop calls `forward_KL(y_batch, source=u_source, F=flow.t())`, which evaluates $F^{-1}$ and $\log|\det J_{F^{-1}}|$ in one ODE integration via `flow.t().inv.call_and_ladj(y_batch)`.
 
 ### What is different about a CNF
 

@@ -4,7 +4,7 @@ Strongly inspired by `zuko` (https://github.com/probabilists/zuko).
 
 Public surface:
 
-    zflows.potential : Potential, Uniform, Gaussian, Gaussian_Mixture, Linear_Combination
+    zflows.potential : Potential, potential_from, Uniform, Gaussian, Gaussian_Mixture, Linear_Combination, linear_combination
     zflows.flow      : Flow, NSF, NCSF, CNF, OTFlow, RealNVP, ComposedTransform
     zflows.loss      : reverse_KL, forward_KL, OT_loss, loss_compile, loss_compile_beta
     zflows.utils     : compute_ESS, compute_ESS_log, compute_CESS, compute_CESS_log,

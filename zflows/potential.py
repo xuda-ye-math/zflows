@@ -176,23 +176,23 @@ class Potential(nn.Module):
 # Functional wrappers — turn a plain callable into a Potential subclass
 # ──────────────────────────────────────────────────────────────────────
 
-def potential_from(fn) -> type[Potential]:
-    """Wrap a stateless callable `(x: Tensor) -> Tensor` as a Potential
-    *subclass* — like writing the subclass by hand, just shorter.
+def potential_from(fn) -> Potential:
+    """Wrap a stateless callable `(x: Tensor) -> Tensor` as a ready-to-use
+    `Potential` *instance* — like writing the subclass by hand and
+    instantiating it, in one line.
 
-    Returns the class itself (not an instance), so callers instantiate
-    explicitly with `U()` just as they would for `Gaussian(...)` etc.
-    Instances support the full toolchain (`.to(device)`,
+    Returns the instance directly (lowercase-factory convention; the
+    name is lowercase because the return is an instance, not a class).
+    The instance supports the full toolchain (`.to(device)`,
     `.enable_grad()`, `.enable_eval()`, `.parameters()`) — there just
     won't be any learnable parameters because `fn` is a plain function.
 
     Example:
-        def U_fn(x: torch.Tensor) -> torch.Tensor:
-            # x: [N, D] -> U(x): [N]   (batched for efficiency)
+        def myforward(x: torch.Tensor) -> torch.Tensor:
+            # x: [N, d] -> [N]   (batched for efficiency)
             return 0.5 * (x ** 2).sum(-1) + 2 * torch.cos(x[:, 0])
 
-        U = potential_from(U_fn)   # class
-        u = U().to(device)         # instance
+        u = potential_from(myforward).to(device)   # instance, chainable
 
     For potentials that carry state (physical constants, learnable
     sub-modules, …), subclass `Potential` directly instead.
@@ -200,24 +200,7 @@ def potential_from(fn) -> type[Potential]:
     class _FunctionPotential(Potential):
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             return fn(x)
-    return _FunctionPotential
-
-
-def potential_instance_from(fn) -> Potential:
-    """One-liner variant of `potential_from` that returns a ready-to-use
-    instance.
-
-    Equivalent to `potential_from(fn)()` — skip if you need to keep the
-    class around (e.g. to instantiate per-device copies); use this when
-    you only ever want a single instance of the wrapped callable.
-
-    Example:
-        def U_fn(x: torch.Tensor) -> torch.Tensor:
-            return 0.5 * (x ** 2).sum(-1) + 2 * torch.cos(x[:, 0])
-
-        u = potential_instance_from(U_fn).to(device)   # instance, chainable
-    """
-    return potential_from(fn)()
+    return _FunctionPotential()
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -240,10 +223,35 @@ class Linear_Combination(Potential):
     iterations to retune one term. Immune to `.to(device)` —
     `float * Tensor` lifts to the tensor's device automatically.
 
+    The combined `_grad_fn` / `_eval_fn` are populated **at __init__
+    time** as Python closures that compute `sum_k self.coeffs[k] *
+    U_k.grad(x)` (and same for `.eval(x)`). They read `self.coeffs[k]`
+    fresh on every call, so coefficient changes via `set_coeffs` are
+    picked up with no recompile.
+
+    `enable_grad` / `enable_eval` are **overridden** to only propagate
+    the compile request to each child potential (skipping children
+    whose own `_grad_fn` / `_eval_fn` is already non-None). They do NOT
+    touch `self._grad_fn` / `self._eval_fn` — those were linked in
+    `__init__` and stay valid for the lifetime of the instance. The
+    "needs `.enable_grad()` first" gate therefore moves from a
+    pre-flight check on `Linear_Combination` (its `_grad_fn` is always
+    non-None) to a *runtime* check inside the closure: an un-enabled
+    child raises `RuntimeError` the first time the closure calls
+    `U.grad(x)` on it.
+
+    CUDA-graph buffer-aliasing safety: with `mode='reduce-overhead'`,
+    each child's `.grad(x)` returns a static buffer that the next
+    compiled call overwrites. The Python expression `c * U.grad(x)` is
+    `(Python float) * Tensor`, which allocates a fresh tensor on every
+    call, so the result is decoupled from the static buffer before the
+    next child's `.grad(x)` clobbers it. Same convention as the `fx =
+    beta * potential.grad(x)` pattern in `langevin` / `hmc` — no
+    `.clone()` is needed.
+
     If you prefer plain Python callables over `Potential` objects, you can
     skip this class entirely: define `lambda x: sum(c_k * U_k(x) for ...)`
-    yourself and wrap it via `potential_from(fn)` (class) or
-    `potential_instance_from(fn)` (instance).
+    yourself and wrap it via `potential_from(fn)` (returns an instance).
     """
     def __init__(
         self,
@@ -274,48 +282,103 @@ class Linear_Combination(Potential):
             coeffs = coeffs.detach().cpu().tolist()
         assert len(potentials) == len(coeffs), \
             f"potentials ({len(potentials)}) and coeffs ({len(coeffs)}) must have the same length"
+
+        # Device-consistency check: scan every parameter and buffer
+        # across all children and require a single device. Potentials
+        # with no parameters or buffers (e.g. `potential_from(fn)`,
+        # `Uniform`'s pure-Python `forward`) are device-agnostic and
+        # contribute nothing to the set, so they're silently allowed.
+        devices = set()
+        for p in potentials:
+            for t in p.parameters():
+                devices.add(t.device)
+            for t in p.buffers():
+                devices.add(t.device)
+        if len(devices) > 1:
+            raise RuntimeError(
+                f"Linear_Combination: child potentials live on different "
+                f"devices: {sorted(map(str, devices))}. Call `.to(device)` "
+                f"on each potential so they all sit on the same device "
+                f"before composing them."
+            )
+
         self.potentials = nn.ModuleList(potentials)
         self.coeffs = [float(c) for c in coeffs]
+
+        # Link the combined fast paths NOW, at __init__ time, as Python
+        # closures over `self`. They read `self.coeffs[k]` and route to
+        # `self.potentials[k].grad(x)` (resp. `.eval(x)`) on every call,
+        # so set_coeffs updates propagate without invalidating anything.
+        # The "needs .enable_grad() first" gate becomes a runtime check
+        # at the child level: an un-enabled child raises RuntimeError
+        # the first time the closure invokes its `.grad(x)` / `.eval(x)`.
+        def _grad_combined(x):
+            g = self.coeffs[0] * self.potentials[0].grad(x)
+            for c, U in zip(self.coeffs[1:], self.potentials[1:]):
+                g = g + c * U.grad(x)
+            return g
+
+        def _eval_combined(x):
+            v = self.coeffs[0] * self.potentials[0].eval(x)
+            for c, U in zip(self.coeffs[1:], self.potentials[1:]):
+                v = v + c * U.eval(x)
+            return v
+
+        self._grad_fn = _grad_combined
+        self._eval_fn = _eval_combined
+
+    def enable_grad(self, mode: str = "reduce-overhead") -> "Linear_Combination":
+        """Override: propagate `enable_grad(mode)` to every child
+        unconditionally. The child's own `Potential.enable_grad` is
+        idempotent (early-returns if `_grad_fn` is non-None), so calling
+        it on an already-hot child is a safe no-op. Does NOT touch
+        `self._grad_fn` (linked in `__init__` to the combined closure).
+
+        Returns self so the call can be chained.
+        """
+        for U in self.potentials:
+            U.enable_grad(mode)
+        return self
+
+    def enable_eval(self, mode: str = "reduce-overhead") -> "Linear_Combination":
+        """Override: propagate `enable_eval(mode)` to every child
+        unconditionally. The child's own `Potential.enable_eval` is
+        idempotent, so calling it on an already-hot child is a safe
+        no-op. Does NOT touch `self._eval_fn` (linked in `__init__` to
+        the combined closure).
+
+        Returns self so the call can be chained.
+        """
+        for U in self.potentials:
+            U.enable_eval(mode)
+        return self
 
     def set_coeffs(
         self,
         coeffs: list[float] | tuple[float, ...] | torch.Tensor,
-        enable_grad: bool = False,
-        enable_eval: bool = False,
     ) -> "Linear_Combination":
-        """Replace `self.coeffs` in place with a new set of weights, and
-        invalidate any previously compiled `.grad(x)` / `.eval(x)` fast
-        paths so subsequent calls cannot return stale-coefficient values.
+        """Replace `self.coeffs` in place with a new set of weights.
+
+        Pure coefficient update: the combined `_grad_fn` / `_eval_fn`
+        closures linked at `__init__` read `self.coeffs[k]` fresh on
+        every call, so the new coefficients take effect on the next
+        `.grad(x)` / `.eval(x)` call automatically — no recompile, no
+        invalidation, and no interaction with the child compiled
+        artifacts. If you also need to enable the children's compiled
+        fast paths, call `.enable_grad()` / `.enable_eval()` explicitly
+        (typically once, at construction time).
 
         Useful for annealed bridges or schedule updates that keep the
-        same `Linear_Combination` instance across rungs — just retune the
-        mix and (optionally) recompile the gradient / forward fast paths.
+        same `Linear_Combination` instance across rungs — just retune
+        the mix and continue calling `.grad(x)` / `.eval(x)`.
 
         Input:
             coeffs: list/tuple of N floats, or a 1-d Tensor of shape [N];
                     None is not accepted (call the constructor or assign
                     `self.coeffs = [1.0 / N] * N` if you want uniform).
                     Length must match the number of potentials.
-            enable_grad: if True, immediately rebuild the compiled
-                    `.grad(x)` fast path against the new coefficients
-                    (equivalent to calling `.enable_grad()` after the
-                    invalidation). If False (default), `_grad_fn` is left
-                    as None and `.grad(x)` will raise until you opt in
-                    again.
-            enable_eval: if True, immediately rebuild the compiled
-                    `.eval(x)` fast path against the new coefficients
-                    (equivalent to calling `.enable_eval()` after the
-                    invalidation). If False (default), `_eval_fn` is
-                    left as None and `.eval(x)` will raise until you opt
-                    in again.
         Returns:
             self, so the call can be chained.
-
-        Note: `enable_grad` / `enable_eval` are idempotent and would
-        otherwise early-return on a second call. `set_coeffs` always
-        clears `_grad_fn` and `_eval_fn` first so the rebuild actually
-        happens, and so any stale CUDA-graph buffer from the old
-        coefficients is dropped.
         """
         assert coeffs is not None, "set_coeffs(): coeffs must not be None"
         if isinstance(coeffs, torch.Tensor):
@@ -327,15 +390,6 @@ class Linear_Combination(Potential):
             f"the stored potentials, got {len(coeffs)}"
         )
         self.coeffs = [float(c) for c in coeffs]
-        # Always drop the previously compiled fast paths — they were
-        # specialised on the old coefficients and would otherwise return
-        # stale gradients / energies on the next call.
-        self._grad_fn = None
-        self._eval_fn = None
-        if enable_grad:
-            self.enable_grad()
-        if enable_eval:
-            self.enable_eval()
         return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -349,6 +403,22 @@ class Linear_Combination(Potential):
         for c, U in zip(self.coeffs[1:], self.potentials[1:]):
             out = out + c * U(x)
         return out
+
+
+def linear_combination(
+    potentials: list["Potential"] | tuple["Potential", ...],
+    coeffs: list[float] | tuple[float, ...] | torch.Tensor | None = None,
+) -> "Linear_Combination":
+    """Factory: build and return a `Linear_Combination` instance.
+
+    Lowercase alias for `Linear_Combination(potentials, coeffs)` — the
+    project-wide convention is uppercase = class, lowercase = instance,
+    and this factory returns *only* an instance. Use this in user code.
+    Reach for `Linear_Combination` directly only when you need the class
+    itself (e.g. `isinstance(u, Linear_Combination)` checks or to
+    subclass).
+    """
+    return Linear_Combination(potentials, coeffs)
 
 
 # ──────────────────────────────────────────────────────────────────────

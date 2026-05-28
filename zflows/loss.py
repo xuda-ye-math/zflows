@@ -158,6 +158,15 @@ def loss_compile(
           without torch.compile (saves the per-batch object construction).
 
     Caveats:
+        - **Only tested on `NSF` / `NCSF`.** Behaviour on `CNF`,
+          `OTFlow`, `RealNVP`, or any other flow class is unknown:
+          their forward / log-det paths use ODE integrators or
+          closed-form mixings that have not been exercised against the
+          captured-transform + `torch.compile` combination here. Use
+          with caution and verify against the un-compiled
+          `reverse_KL(x, target, flow.t())` baseline before relying on
+          the speedup. Filing a report with the offending flow class is
+          welcome.
         - mode='default' is safe; mode='reduce-overhead' uses CUDA
           graphs (faster but needs static batch size and stable
           parameter memory; do not call `flow.zeros()` mid-training).
@@ -223,7 +232,11 @@ def loss_compile_beta(
           `beta_t = torch.tensor(0.5, device=device)` for tightest loops.
 
     All the captured-once / Dynamo-cache-stability arguments from
-    `loss_compile` carry over verbatim.
+    `loss_compile` carry over verbatim — including the **"only tested
+    on `NSF` / `NCSF`"** caveat. On `CNF`, `OTFlow`, `RealNVP`, or any
+    other flow class, behaviour is unknown; verify against the
+    un-compiled `reverse_KL(x, target, flow.t(), beta)` baseline before
+    relying on the speedup.
 
     Arguments:
         loss_fn:   any callable with signature

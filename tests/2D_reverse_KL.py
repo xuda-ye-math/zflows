@@ -1,7 +1,7 @@
 from pathlib import Path
 import torch
 from zflows.flow import NSF
-from zflows.potential import Potential, Gaussian
+from zflows.potential import Gaussian, potential_from
 from zflows.utils import compute_ESS_log, suppress_warnings
 from zflows.loss import reverse_KL
 
@@ -12,19 +12,16 @@ HERE = Path(__file__).resolve().parent
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 torch.manual_seed(0)
 
-# source: U0(x) = (x1^2+x2^2)/2 (Gaussian prior)
-u0 = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device)
+# source: U_source(x) = (x1^2 + x2^2) / 2  (Gaussian prior)
+u_source = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device)
 
-# target: U1(x) = (x1^2+x2^2)/2 + 2*cos(x1)
-class U1(Potential): # target potential
-    def __init__(self):
-        super().__init__()
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x1 = x[:,0] # [N]
-        x2 = x[:,1] # [N]
-        return 0.5 * (x1 ** 2 + x2 ** 2) + 2 * torch.cos(x1)
-    
-u1 = U1().to(device) # to(device) can be removed here
+# target: U_target(x) = (x1^2 + x2^2) / 2 + 2 * cos(x1)
+def U_target_forward(x: torch.Tensor) -> torch.Tensor: # Tensor [N, d] -> Tensor [N]
+    x1 = x[:, 0]
+    x2 = x[:, 1]
+    return 0.5 * (x1 ** 2 + x2 ** 2) + 2 * torch.cos(x1)
+
+u_target = potential_from(U_target_forward).to(device)
 
 # initialize Neural Spline Flow (NSF)
 flow = NSF(a=[-4, -4], b=[4, 4], bins=8, transforms=4, hidden_features=(64, 64)).to(device)
@@ -35,7 +32,7 @@ LR: float = 1e-3 # learning rate
 BATCH: int = 1000 # batch size
 EPOCH: int = 10 # number of epochs
 
-x = u0.samples(N) # generate samples
+x = u_source.samples(N) # generate samples
 optimizer = torch.optim.Adam(flow.parameters(), lr=LR)
 
 for epoch in range(EPOCH):
@@ -46,7 +43,7 @@ for epoch in range(EPOCH):
         idx = perm[start:start + BATCH]
         x_batch = x[idx]
 
-        loss = reverse_KL(x_batch, target=u1, F=flow.t())
+        loss = reverse_KL(x_batch, target=u_target, F=flow.t())
 
         optimizer.zero_grad()
         loss.backward()
@@ -62,12 +59,12 @@ for epoch in range(EPOCH):
 import matplotlib.pyplot as plt
 
 with torch.no_grad():
-    x_plot = u0.samples(N) # fresh samples from source
+    x_plot = u_source.samples(N) # fresh samples from source
     y_plot, ladj = flow.t().call_and_ladj(x_plot) # pushforward F(x)
 
-    # importance sampling: target density ~ exp(-u1(y)), proposal density q(y).
-    # log q(y) = -u0(x) - ladj, so log w = -u1(y) + u0(x) + ladj.
-    log_w = -u1(y_plot) + u0(x_plot) + ladj
+    # importance sampling: target density ~ exp(-u_target(y)), proposal density q(y).
+    # log q(y) = -u_source(x) - ladj, so log w = -u_target(y) + u_source(x) + ladj.
+    log_w = -u_target(y_plot) + u_source(x_plot) + ladj
 
 ess = compute_ESS_log(log_w)
 print(f"ESS = {ess.item():.4f}")

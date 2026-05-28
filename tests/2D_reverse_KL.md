@@ -8,7 +8,7 @@ We train a Neural Spline Flow (NSF) $F$ such that the pushforward of a 2D Gaussi
 
 ## Mathematical background
 
-Both `Potential` subclasses return $U(x)$ for a batch of points $x \in \mathbb R^2$. By definition,
+Both potentials return $U(x)$ for a batch of points $x \in \mathbb R^2$. The source uses the built-in `Gaussian(...)` instance; the target is built via the `potential_from(U_target_forward)` factory directly from a stateless `(x) -> Tensor` callable. By definition,
 $$
 \mu_0(x) \propto \exp(-U_0(x)), \qquad \mu_1(y) \propto \exp(-U_1(y)).
 $$
@@ -61,13 +61,13 @@ python -m tests.2D_reverse_KL
 
 Pointers into the script:
 
-- imports + `suppress_warnings` + device setup: [`2D_reverse_KL.py:1–11`](2D_reverse_KL.py#L1-L11)
-- source and target potentials: [`2D_reverse_KL.py:13–25`](2D_reverse_KL.py#L13-L25)
-- flow init: [`2D_reverse_KL.py:28`](2D_reverse_KL.py#L28)
-- training parameters: [`2D_reverse_KL.py:30–34`](2D_reverse_KL.py#L30-L34)
-- training loop (mini-batched reverse KL): [`2D_reverse_KL.py:36–57`](2D_reverse_KL.py#L36-L57)
-- IS reweighting + $\mathrm{ESS}$: [`2D_reverse_KL.py:60–71`](2D_reverse_KL.py#L60-L71)
-- plotting: [`2D_reverse_KL.py:73–96`](2D_reverse_KL.py#L73-L96)
+- imports + `suppress_warnings` + device setup: [`2D_reverse_KL.py:1–13`](2D_reverse_KL.py#L1-L13)
+- source (`Gaussian`) and target (`potential_from(U_target_forward)`): [`2D_reverse_KL.py:15–24`](2D_reverse_KL.py#L15-L24)
+- flow init: [`2D_reverse_KL.py:27`](2D_reverse_KL.py#L27)
+- training parameters: [`2D_reverse_KL.py:29–33`](2D_reverse_KL.py#L29-L33)
+- training loop (mini-batched reverse KL): [`2D_reverse_KL.py:35–56`](2D_reverse_KL.py#L35-L56)
+- IS reweighting + $\mathrm{ESS}$: [`2D_reverse_KL.py:61–72`](2D_reverse_KL.py#L61-L72)
+- plotting: [`2D_reverse_KL.py:74–97`](2D_reverse_KL.py#L74-L97)
 
 <p align="center"><img src="2D_reverse_KL.png" alt="reverse KL test" width="700px"></p>
 

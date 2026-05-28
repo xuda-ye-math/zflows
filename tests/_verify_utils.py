@@ -27,7 +27,7 @@ import math
 
 import torch
 
-from zflows.potential import Gaussian, Potential
+from zflows.potential import Gaussian, Potential, potential_from
 from zflows.flow import NSF
 from zflows.utils import (
     hmc, langevin, stochastic_heun, lbfgs, optimization,
@@ -70,10 +70,9 @@ banner("A. Tamed Langevin on U(x) = ||x||^4 / 4  (cubic gradient)")
 # iterations. Tamed drift G(x) = grad U / (1 + taming * ||grad U||)
 # caps ||step * G|| <= step / taming.
 
-class Quartic(Potential):
-    """U(x) = (1/4) * ||x||^4 — grad U(x) = ||x||^2 * x grows super-linearly."""
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return 0.25 * (x ** 2).sum(dim=-1) ** 2
+# U(x) = (1/4) * ||x||^4 — grad U(x) = ||x||^2 * x grows super-linearly.
+def Quartic_forward(x: torch.Tensor) -> torch.Tensor: # Tensor [N, d] -> Tensor [N]
+    return 0.25 * (x ** 2).sum(dim=-1) ** 2
 
 
 N_T, D_T, STEP_T, ITERS_T, TAMING = 512, 2, 0.5, 200, 0.1
@@ -84,7 +83,7 @@ def fresh_init():
 
 # A.1 — plain ULA blows up
 section("A.1  plain ULA (taming=0) blows up")
-u_q = Quartic().to(device).enable_grad()
+u_q = potential_from(Quartic_forward).to(device).enable_grad()
 x0 = fresh_init()
 torch.manual_seed(1)
 y_ula = langevin(x0, potential=u_q, step=STEP_T, iters=ITERS_T, taming=0.0)
@@ -98,7 +97,7 @@ print("  [OK ] ULA is unstable, as expected")
 
 # A.2 — tamed ULA stays bounded
 section(f"A.2  tamed ULA (taming={TAMING}) stays bounded")
-u_q = Quartic().to(device).enable_grad()
+u_q = potential_from(Quartic_forward).to(device).enable_grad()
 x0 = fresh_init()
 torch.manual_seed(1)
 y_tamed = langevin(x0, potential=u_q, step=STEP_T, iters=ITERS_T, taming=TAMING)
@@ -113,7 +112,7 @@ print("  [OK ] tamed chain stays bounded")
 
 # A.3 — adjust=True + taming>0 forbidden
 section("A.3  adjust=True together with taming>0 raises ValueError")
-u_q = Quartic().to(device).enable_grad()
+u_q = potential_from(Quartic_forward).to(device).enable_grad()
 x0 = fresh_init()
 raised = False
 try:
@@ -273,12 +272,11 @@ section("B.8  U(x) = x^4 / 4 (cubic gradient): sampling + tail rejection")
 # (8a) sampling correctness against the analytic moment.
 # For 1D p(x) = exp(-x^4/4) / Z (Z = 2 * 4^(-3/4) * Gamma(1/4)), the
 # substitution u = x^4 / 4 gives E[x^2] = 2*Gamma(3/4)/Gamma(1/4) ≈ 0.6760.
-class Quartic1D(Potential):
-    """U(x) = sum_i x_i^4 / 4 — gradient grows as x^3."""
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return 0.25 * (x ** 4).sum(dim=-1)
+# U(x) = sum_i x_i^4 / 4 — gradient grows as x^3.
+def Quartic1D_forward(x: torch.Tensor) -> torch.Tensor: # Tensor [N, d] -> Tensor [N]
+    return 0.25 * (x ** 4).sum(dim=-1)
 
-u_q = Quartic1D().to(device).enable_grad().enable_eval()
+u_q = potential_from(Quartic1D_forward).to(device).enable_grad().enable_eval()
 target_std = math.sqrt(2 * math.gamma(0.75) / math.gamma(0.25))
 
 torch.manual_seed(8)

@@ -24,12 +24,13 @@ HERE = Path(__file__).resolve().parent
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 torch.manual_seed(0)
 
-# source: U0(x) = const   (uniform on [-pi, pi]^3)
-u0 = Uniform(a=[-math.pi, -math.pi, -math.pi], b=[math.pi, math.pi, math.pi]).to(device)
+# source: U_source(x) = const   (uniform on [-pi, pi]^3)
+u_source = Uniform(a=[-math.pi, -math.pi, -math.pi], b=[math.pi, math.pi, math.pi]).to(device)
 
 # target: von Mises ridge mixture on the 3-torus
-# U1(x) = -log[ exp(k cos(x1-x2)) + exp(k cos(x2-x3)) + exp(k cos(x3-x1)) ]
-class U1(Potential):
+# U_target(x) = -log[ exp(k cos(x1-x2)) + exp(k cos(x2-x3)) + exp(k cos(x3-x1)) ]
+# (kept as a Potential subclass since it carries a kappa parameter.)
+class U_target(Potential):
     def __init__(self, kappa: float = 4.0):
         super().__init__()
         self.kappa = kappa
@@ -42,7 +43,7 @@ class U1(Potential):
         ], dim=-1) # [N, 3]
         return -torch.logsumexp(logits, dim=-1) # [N]
 
-u1 = U1(kappa=4.0).to(device)
+u_target = U_target(kappa=4.0).to(device)
 
 # initialize Neural Circular Spline Flow (NCSF)
 flow = NCSF(
@@ -57,7 +58,7 @@ LR: float = 1e-3 # learning rate
 BATCH: int = 2000 # batch size
 EPOCH: int = 20 # number of epochs
 
-x = u0.samples(N) # generate samples
+x = u_source.samples(N) # generate samples
 optimizer = torch.optim.Adam(flow.parameters(), lr=LR)
 
 # Compile the reverse-KL training step once. F = flow.t() is captured here
@@ -66,7 +67,7 @@ optimizer = torch.optim.Adam(flow.parameters(), lr=LR)
 # loss_compile (single-input fast path) because beta stays at its default
 # 1.0 throughout training; for an annealing schedule, swap to loss_compile_beta.
 F = flow.t()
-loss_fn = zflows.loss.loss_compile(reverse_KL, u1, F)
+loss_fn = zflows.loss.loss_compile(reverse_KL, u_target, F)
 
 for epoch in range(EPOCH):
     perm = torch.randperm(N, device=device)
@@ -92,9 +93,9 @@ for epoch in range(EPOCH):
 import matplotlib.pyplot as plt
 
 with torch.no_grad():
-    x_plot = u0.samples(N) # fresh samples from source
+    x_plot = u_source.samples(N) # fresh samples from source
     y_plot, _ = flow.t().call_and_ladj(x_plot) # pushforward F(x), used for resampling
-    log_w = importance_weights_log(x_plot, source=u0, target=u1, F=flow.t(), chunk=2)
+    log_w = importance_weights_log(x_plot, source=u_source, target=u_target, F=flow.t(), chunk=2)
 
 ess = compute_ESS_log(log_w)
 print(f"ESS = {ess.item():.4f}")
@@ -104,9 +105,9 @@ with torch.no_grad():
     w = (log_w - log_w.max()).exp() # normalize-stable weights
     y_resampled = resample(y_plot, w)
 
-u1.enable_eval() # for faster MALA
-u1.enable_grad() # opt-in: build .grad(x) only when needed
-y_fresh = rejuvenation(y_resampled, potential=u1, adjust=True, chunk=4) # default step / iters
+u_target.enable_eval() # for faster MALA
+u_target.enable_grad() # opt-in: build .grad(x) only when needed
+y_fresh = rejuvenation(y_resampled, potential=u_target, adjust=True, chunk=4) # default step / iters
 
 # subsample for a less crowded 3D scatter
 N_PLOT = 10000

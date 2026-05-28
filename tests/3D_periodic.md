@@ -12,7 +12,7 @@ The density is genuinely periodic (only $\cos$ of differences appears), and conc
 
 ## Mathematical background
 
-Both `Potential` subclasses return $U(x)$ for a batch of points $x \in [-\pi, \pi]^3$. By definition,
+Both potentials return $U(x)$ for a batch of points $x \in [-\pi, \pi]^3$. The source is the built-in `Uniform(...)` (no per-element state), and the target is a small `class U_target(Potential)` kept as a subclass because it carries a `kappa` parameter. By definition,
 $$
 \mu_0(x) \propto \exp(-U_0(x)), \qquad \mu_1(\theta) \propto \exp(-U_1(\theta)).
 $$
@@ -30,14 +30,14 @@ because `flow.t().call_and_ladj(x)` returns the same `(y, ladj)` interface.
 
 ```python
 F = flow.t()
-loss_fn = zflows.loss.loss_compile(reverse_KL, u1, F)
+loss_fn = zflows.loss.loss_compile(reverse_KL, u_target, F)
 for epoch in range(EPOCH):
     for x_batch in ...:
         loss = loss_fn(x_batch)
         optimizer.zero_grad(); loss.backward(); optimizer.step()
 ```
 
-Capturing $F$ once is correct because the lazy `Transform` machinery re-reads `flow`'s `nn.Parameter` tensors by attribute access on every forward — `optimizer.step()` mutates those parameters in-place, so the captured $F$ always sees the post-step weights. The first few steps pay a one-time compile cost (Dynamo traces + Inductor lowers + Triton autotunes), after which every subsequent step is one fused CUDA-graph replay per call — typically 3–10× faster than the un-compiled `reverse_KL(x, target=u1, F=flow.t())` pattern on the NSF / NCSF families at small $d$. The companion benchmark [`tests/compare_compiled_loss.py`](compare_compiled_loss.py) quantifies the speedup across `(d, hidden_features)` grids.
+Capturing $F$ once is correct because the lazy `Transform` machinery re-reads `flow`'s `nn.Parameter` tensors by attribute access on every forward — `optimizer.step()` mutates those parameters in-place, so the captured $F$ always sees the post-step weights. The first few steps pay a one-time compile cost (Dynamo traces + Inductor lowers + Triton autotunes), after which every subsequent step is one fused CUDA-graph replay per call — typically 3–10× faster than the un-compiled `reverse_KL(x, target=u_target, F=flow.t())` pattern on the NSF / NCSF families at small $d$. The companion benchmark [`tests/compare_compiled_loss.py`](compare_compiled_loss.py) quantifies the speedup across `(d, hidden_features)` grids.
 
 ### Importance sampling and $\mathrm{ESS}$
 
@@ -45,7 +45,7 @@ With the trained flow as proposal $\nu = F_\# \mu_0$, the unnormalized log-weigh
 $$
 \log w(\theta) = -U_1(\theta) + U_0(x) + \log |\det J_F(x)|, \qquad \theta = F(x), \; x \sim \mu_0,
 $$
-and the Effective Sample Size $\mathrm{ESS} = (\sum w_i)^2 / (N \sum w_i^2) \in [0, 1]$ tells us how concentrated those weights are. The one-call API is `importance_weights_log(samples=x, source=u0, target=u1, F=flow.t())`, returning the log-weights ready for `compute_ESS_log` (or `(log_w - log_w.max()).exp()` if you need the linear weights).
+and the Effective Sample Size $\mathrm{ESS} = (\sum w_i)^2 / (N \sum w_i^2) \in [0, 1]$ tells us how concentrated those weights are. The one-call API is `importance_weights_log(samples=x, source=u_source, target=u_target, F=flow.t())`, returning the log-weights ready for `compute_ESS_log` (or `(log_w - log_w.max()).exp()` if you need the linear weights).
 
 ### Resampling: from weighted to equally-weighted particles
 
@@ -55,16 +55,16 @@ IS produces $N$ samples $\{\theta_i\}$ with unequal weights $\{w_i\}$. Many down
 
 ### `enable_grad` and `enable_eval`: opt-in compiled fast paths for `Potential`
 
-The rejuvenation step needs $\nabla U_1(\theta)$ for the proposal *and* $U_1(\theta)$ itself for the MALA accept/reject decision. The base `Potential` class does **not** build either fast path by default — many use cases (forward-only sampling, IS evaluation, KL training) only need a regular `u1(x)` call, and we don't want to pay the `torch.compile` startup cost or pull in `torch.func` for those. Two opt-ins are exposed:
+The rejuvenation step needs $\nabla U_1(\theta)$ for the proposal *and* $U_1(\theta)$ itself for the MALA accept/reject decision. The base `Potential` class does **not** build either fast path by default — many use cases (forward-only sampling, IS evaluation, KL training) only need a regular `u_target(x)` call, and we don't want to pay the `torch.compile` startup cost or pull in `torch.func` for those. Two opt-ins are exposed:
 
 ```python
-u1.enable_grad()       # compiles vmap(grad(u1)),  stored in u1._grad_fn
-u1.enable_eval()       # compiles u1.forward,      stored in u1._eval_fn
-g = u1.grad(theta)     # [N, d], works without theta.requires_grad=True
-v = u1.eval(theta)     # [N], faster than u1(theta) on the MALA hot loop
+u_target.enable_grad()       # compiles vmap(grad(u_target)),  stored in u_target._grad_fn
+u_target.enable_eval()       # compiles u_target.forward,      stored in u_target._eval_fn
+g = u_target.grad(theta)     # [N, d], works without theta.requires_grad=True
+v = u_target.eval(theta)     # [N], faster than u_target(theta) on the MALA hot loop
 ```
 
-Under the hood (in [`zflows/potential.py`](../zflows/potential.py)), `enable_grad` caches `torch.compile(vmap(grad(U_1)))` as the compiled gradient $\nabla U_1$, and `enable_eval` caches `torch.compile(U_1)` as the compiled forward, so every subsequent `.grad(\theta)` / `.eval(\theta)` is a single fused kernel call with no Python-level autograd-graph construction. Both calls are **idempotent** (a second invocation does not recompile) and chainable. Inside the MALA branch of `langevin()`, if `_eval_fn` is populated the energy evaluations $U_1(y)$ and $U_1(x)$ in $\log\alpha$ route through it; otherwise they fall back to the regular `u1(\theta)` call. `u1.eval()` with no argument retains the standard `nn.Module` semantics (switch to eval mode, return `self`). The single call to `zflows.utils.suppress_warnings()` at the top of the script silences Triton autotune chatter, Inductor worker-pool diagnostics, Dynamo recompile logs, and routine Python `UserWarning`s in one go — see [`zflows/utils.py`](../zflows/utils.py).
+Under the hood (in [`zflows/potential.py`](../zflows/potential.py)), `enable_grad` caches `torch.compile(vmap(grad(U_1)))` as the compiled gradient $\nabla U_1$, and `enable_eval` caches `torch.compile(U_1)` as the compiled forward, so every subsequent `.grad(\theta)` / `.eval(\theta)` is a single fused kernel call with no Python-level autograd-graph construction. Both calls are **idempotent** (a second invocation does not recompile) and chainable. Inside the MALA branch of `langevin()`, if `_eval_fn` is populated the energy evaluations $U_1(y)$ and $U_1(x)$ in $\log\alpha$ route through it; otherwise they fall back to the regular `u_target(\theta)` call. `u_target.eval()` with no argument retains the standard `nn.Module` semantics (switch to eval mode, return `self`). The single call to `zflows.utils.suppress_warnings()` at the top of the script silences Triton autotune chatter, Inductor worker-pool diagnostics, Dynamo recompile logs, and routine Python `UserWarning`s in one go — see [`zflows/utils.py`](../zflows/utils.py).
 
 ### Rejuvenation: overdamped Langevin
 
@@ -90,16 +90,16 @@ python -m tests.3D_periodic
 
 Pointers into the script:
 
-- imports + `suppress_warnings` / `set_cache_size_limit`: [`3D_periodic.py:1–22`](3D_periodic.py#L1-L22)
-- source (uniform on the 3-torus) and target ($U_1$ ridge mixture): [`3D_periodic.py:27–45`](3D_periodic.py#L27-L45)
-- NCSF init: [`3D_periodic.py:47–52`](3D_periodic.py#L47-L52)
-- training parameters: [`3D_periodic.py:54–58`](3D_periodic.py#L54-L58)
-- captured `F = flow.t()` + compiled loss factory: [`3D_periodic.py:63–67`](3D_periodic.py#L63-L67)
-- training loop (mini-batched reverse KL through `loss_fn`): [`3D_periodic.py:69–87`](3D_periodic.py#L69-L87)
-- IS reweighting via `importance_weights_log` + $\mathrm{ESS}$: [`3D_periodic.py:89–98`](3D_periodic.py#L89-L98)
-- resample weighted cloud → equal-weight cloud: [`3D_periodic.py:100–103`](3D_periodic.py#L100-L103)
-- `enable_eval` + `enable_grad` + Langevin rejuvenation: [`3D_periodic.py:105–107`](3D_periodic.py#L105-L107)
-- 3D scatter plot: [`3D_periodic.py:109–127`](3D_periodic.py#L109-L127)
+- imports + `suppress_warnings` / `set_cache_size_limit`: [`3D_periodic.py:1–20`](3D_periodic.py#L1-L20)
+- source (uniform on the 3-torus) and target ($U_1$ ridge mixture): [`3D_periodic.py:27–46`](3D_periodic.py#L27-L46)
+- NCSF init: [`3D_periodic.py:48–53`](3D_periodic.py#L48-L53)
+- training parameters: [`3D_periodic.py:55–59`](3D_periodic.py#L55-L59)
+- captured `F = flow.t()` + compiled loss factory: [`3D_periodic.py:64–70`](3D_periodic.py#L64-L70)
+- training loop (mini-batched reverse KL through `loss_fn`): [`3D_periodic.py:72–89`](3D_periodic.py#L72-L89)
+- IS reweighting via `importance_weights_log` + $\mathrm{ESS}$: [`3D_periodic.py:92–100`](3D_periodic.py#L92-L100)
+- resample weighted cloud → equal-weight cloud: [`3D_periodic.py:103–105`](3D_periodic.py#L103-L105)
+- `enable_eval` + `enable_grad` + Langevin rejuvenation: [`3D_periodic.py:107–110`](3D_periodic.py#L107-L110)
+- 3D scatter plot: [`3D_periodic.py:112–129`](3D_periodic.py#L112-L129)
 
 <p align="center"><img src="3D_periodic.png" alt="3D periodic test" width="500px"></p>
 
@@ -108,7 +108,7 @@ Pointers into the script:
 1. **Train.** Reverse KL fits an NCSF proposal $\nu = F_\# \mu_0$ to the target $\mu_1 \propto \exp(-U_1)$, using only $U_1$ (no target samples).
 2. **Importance sampling.** Push $\mu_0$-samples through $F$, compute log-weights $\log w = -U_1(F(x)) + U_0(x) + \log|\det J_F|$, report $\mathrm{ESS}$ as a self-test.
 3. **Resample.** Multinomial resampling $\{\theta_i, w_i\} \to \{\theta_{j_i}\}$ converts a weighted cloud into an equally-weighted cloud (with duplicate particles).
-4. **Enable gradients (and forward).** `u1.enable_grad()` builds a `torch.compile`-compiled `vmap(grad(U_1))`; `u1.enable_eval()` additionally builds a compiled forward $U_1(\theta)$. Both are cached on the instance and reused on every subsequent call.
-5. **Rejuvenate.** Overdamped Langevin (alias `rejuvenation`) with `adjust=True` runs MALA: the proposal uses `u1.grad`, and the accept/reject step uses `u1.eval` when `_eval_fn` is populated (else falls back to `u1(theta)`). The stationary density is exactly $\mu_1$.
+4. **Enable gradients (and forward).** `u_target.enable_grad()` builds a `torch.compile`-compiled `vmap(grad(U_1))`; `u_target.enable_eval()` additionally builds a compiled forward $U_1(\theta)$. Both are cached on the instance and reused on every subsequent call.
+5. **Rejuvenate.** Overdamped Langevin (alias `rejuvenation`) with `adjust=True` runs MALA: the proposal uses `u_target.grad`, and the accept/reject step uses `u_target.eval` when `_eval_fn` is populated (else falls back to `u_target(theta)`). The stationary density is exactly $\mu_1$.
 
 The NCSF + IS + resample + Langevin pipeline is the basic building block of *flow-augmented SMC* on manifolds: the flow gives a good global proposal, IS provides unbiased correction, and Langevin gives local mixing using the geometry of $U_1$ itself.
