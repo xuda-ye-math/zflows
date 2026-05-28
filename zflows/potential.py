@@ -249,6 +249,19 @@ class Linear_Combination(Potential):
     beta * potential.grad(x)` pattern in `langevin` / `hmc` — no
     `.clone()` is needed.
 
+    **Do NOT nest linear_combinations.** Using a `Linear_Combination`
+    instance as a *child* of another `Linear_Combination` (i.e. a
+    linear combination of linear combinations) is **untested and not
+    recommended**. The combined `_grad_fn` / `_eval_fn` closures and
+    the device-consistency check are designed for a single flat layer
+    of children; the nested case has not been exercised and may
+    interact badly with the buffer-aliasing assumption above (every
+    child's compiled `.grad(x)` returning a static reduce-overhead
+    buffer that is consumed before the next compiled child runs).
+    Instead, list every constituent potential in one call and combine
+    them with a single flat `linear_combination([u_0, u_1, ..., u_N],
+    [c_0, c_1, ..., c_N])`.
+
     If you prefer plain Python callables over `Potential` objects, you can
     skip this class entirely: define `lambda x: sum(c_k * U_k(x) for ...)`
     yourself and wrap it via `potential_from(fn)` (returns an instance).
@@ -417,6 +430,13 @@ def linear_combination(
     Reach for `Linear_Combination` directly only when you need the class
     itself (e.g. `isinstance(u, Linear_Combination)` checks or to
     subclass).
+
+    Note: do NOT nest linear_combinations (passing a `Linear_Combination`
+    instance as one of `potentials`). That case is untested and not
+    recommended — list every constituent potential up front and combine
+    them with a single flat `linear_combination([u_0, ..., u_N],
+    [c_0, ..., c_N])` instead. See `Linear_Combination`'s class
+    docstring for the buffer-aliasing rationale.
     """
     return Linear_Combination(potentials, coeffs)
 
