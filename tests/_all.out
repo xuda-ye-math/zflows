@@ -1,0 +1,951 @@
+
+────────────────────────────────────────────────────────────
+1. Construction + .to(device)
+────────────────────────────────────────────────────────────
+  NSF d=2: 29368 params
+  NSF d=3 asymmetric: halfwidth=[1.0, 2.0, 2.5]
+  NCSF d=3: 35604 params
+  RealNVP d=4: 5136 params, 4 layers
+  CNF d=2: 1410 params
+  CNF d=2 (Hutchinson): 1410 params
+  OTFlow d=2: 2284 params
+
+────────────────────────────────────────────────────────────
+2. Bijection round-trip
+────────────────────────────────────────────────────────────
+  [OK ] NSF symmetric  F.inv(F(x)) ≈ x: max |diff| = 3.040e-06  (atol=0.0001)
+  [OK ] NSF asymmetric  F.inv(F(x)) ≈ x: max |diff| = 9.537e-07  (atol=0.0001)
+  [OK ] NCSF  F.inv(F(x)) ≈ x: max |diff| = 1.907e-06  (atol=0.0001)
+  [OK ] RealNVP    F.inv(F(x)) ≈ x: max |diff| = 3.576e-07  (atol=1e-05)
+  [OK ] CNF        F.inv(F(x)) ≈ x: max |diff| = 1.192e-07  (atol=0.0005)
+  [OK ] OTFlow     F.inv(F(x)) ≈ x  (nt=32): max |diff| = 4.792e-05  (atol=0.001)
+
+────────────────────────────────────────────────────────────
+3. zeros() initialisation → identity bijection
+────────────────────────────────────────────────────────────
+  [OK ] NSF zeros  y ≈ x: max |diff| = 0.000e+00  (atol=1e-05)
+  [OK ] NSF zeros  ladj ≈ 0: max |diff| = 4.768e-07  (atol=1e-05)
+  [OK ] NSF asym zeros  y ≈ x: max |diff| = 1.192e-07  (atol=1e-05)
+  [OK ] NSF asym zeros  ladj ≈ 0: max |diff| = 5.364e-07  (atol=1e-05)
+  [OK ] NCSF zeros  y ≈ x: max |diff| = 1.192e-07  (atol=0.0001)
+  [OK ] NCSF zeros  ladj ≈ 0: max |diff| = 4.768e-07  (atol=0.0001)
+  [OK ] RealNVP zeros  y ≈ x: max |diff| = 0.000e+00  (atol=1e-05)
+  [OK ] RealNVP zeros  ladj ≈ 0: max |diff| = 0.000e+00  (atol=1e-05)
+  [OK ] CNF zeros  y ≈ x: max |diff| = 0.000e+00  (atol=0.0001)
+  [OK ] CNF zeros  ladj ≈ 0: max |diff| = 0.000e+00  (atol=0.0001)
+  [OK ] OTFlow zeros  y ≈ x: max |diff| = 0.000e+00  (atol=1e-05)
+  [OK ] OTFlow zeros  ladj ≈ 0: max |diff| = 0.000e+00  (atol=1e-05)
+
+────────────────────────────────────────────────────────────
+4. log|det J| via call_and_ladj matches autograd slogdet
+────────────────────────────────────────────────────────────
+  [OK ] NSF  ladj ≈ autograd slogdet: max |diff| = 1.287e-06  (atol=0.001)
+  [OK ] NSF asym  ladj ≈ autograd slogdet: max |diff| = 1.371e-06  (atol=0.001)
+  [OK ] NCSF  ladj ≈ autograd slogdet: max |diff| = 1.550e-06  (atol=0.001)
+  [OK ] RealNVP  ladj ≈ autograd slogdet: max |diff| = 2.533e-07  (atol=0.0001)
+  [OK ] CNF  ladj ≈ autograd slogdet: max |diff| = 7.637e-07  (atol=0.005)
+  [OK ] OTFlow  ladj ≈ autograd slogdet: max |diff| = 5.341e-05  (atol=0.001)
+
+────────────────────────────────────────────────────────────
+5. NSF preserves the box
+────────────────────────────────────────────────────────────
+  Particles outside [a, b]: 0 / 1000
+  [OK ] all particles inside the box
+
+────────────────────────────────────────────────────────────
+6. NCSF box preservation + per-coord CircularShift correctness
+────────────────────────────────────────────────────────────
+  Particles outside [-pi, pi]^3: 0 / 500
+  [OK ] all NCSF outputs inside the periodic box
+  [OK ] CircularShift  per-coord period invariance: max |diff| = 5.960e-08  (atol=1e-06)
+
+────────────────────────────────────────────────────────────
+7. AdditiveTransform-sandwich invariant (NSF)
+────────────────────────────────────────────────────────────
+  [OK ] NSF  ladj == ladj_inner  (translation contributes 0): max |diff| = 0.000e+00  (atol=1e-06)
+
+────────────────────────────────────────────────────────────
+8. randmask=False alternating-ordering path
+────────────────────────────────────────────────────────────
+  [OK ] NSF randmask=False  F.inv(F(x)) ≈ x: max |diff| = 2.146e-06  (atol=0.0001)
+  [OK ] NSF randmask=False  zeros() y ≈ x: max |diff| = 0.000e+00  (atol=1e-05)
+  [OK ] NSF randmask=False  zeros() ladj ≈ 0: max |diff| = 4.768e-07  (atol=1e-05)
+  [OK ] NCSF randmask=False  F.inv(F(x)) ≈ x: max |diff| = 1.907e-06  (atol=0.0001)
+  [OK ] NCSF randmask=False  zeros() y ≈ x: max |diff| = 5.960e-08  (atol=1e-05)
+  [OK ] NCSF randmask=False  zeros() ladj ≈ 0: max |diff| = 4.768e-07  (atol=1e-05)
+  [OK ] RealNVP randmask=False  F.inv(F(x)) ≈ x: max |diff| = 2.980e-07  (atol=0.0001)
+  [OK ] RealNVP randmask=False  zeros() y ≈ x: max |diff| = 0.000e+00  (atol=1e-05)
+  [OK ] RealNVP randmask=False  zeros() ladj ≈ 0: max |diff| = 0.000e+00  (atol=1e-05)
+
+────────────────────────────────────────────────────────────
+9. RealNVP forward + inverse ladj cancel
+────────────────────────────────────────────────────────────
+  [OK ] RealNVP  ladj_fwd + ladj_inv ≈ 0: max |diff| = 5.960e-08  (atol=1e-05)
+  [OK ] RealNVP  inv(F(x)) ≈ x: max |diff| = 2.384e-07  (atol=1e-05)
+
+────────────────────────────────────────────────────────────
+10. CNF Hutchinson estimator is unbiased
+────────────────────────────────────────────────────────────
+  exact ladj         = [-0.015308955684304237, -0.011405717581510544, -0.010583733208477497, -0.016045911237597466]
+  Hutch  avg (M=32)  = [-0.014351977035403252, -0.01182455662637949, -0.017189856618642807, -0.016643352806568146]
+  max |avg - exact|  = 6.606e-03
+  [OK ] Hutchinson estimator ≈ exact within MC noise
+
+────────────────────────────────────────────────────────────
+11. CNF dual interface  cnf.t()  ≡  cnf._ffj()
+────────────────────────────────────────────────────────────
+  isinstance(T_z, ComposedTransform)       = True
+  isinstance(T_n, FreeFormJacobianTransform) = True
+  len(T_z.transforms) (length-1 wrapper)   = 1
+  [OK ] cnf.t() / cnf._ffj()  forward y agree: max |diff| = 0.000e+00  (atol=1e-05)
+  [OK ] cnf.t() / cnf._ffj()  forward ladj agree: max |diff| = 0.000e+00  (atol=1e-05)
+  [OK ] cnf.t() / cnf._ffj()  inverse agree: max |diff| = 0.000e+00  (atol=1e-05)
+  #param tensors with non-None grad    = 6
+  max |grad_t() - grad_ffj()|         = 0.000e+00
+  [OK ] both interfaces reach identical gradients
+
+────────────────────────────────────────────────────────────
+12. Backprop reaches every parameter
+────────────────────────────────────────────────────────────
+  RealNVP: 24/24 parameter tensors have non-None grad
+  CNF: 6/6 parameter tensors have non-None grad
+  OTFlow: 9/9 parameter tensors have non-None grad
+  [OK ] every parameter receives gradients
+
+────────────────────────────────────────────────────────────
+13. zflows.loss.loss_compile / loss_compile_beta sanity
+────────────────────────────────────────────────────────────
+
+  13a. loss_compile  — single-input fast path, no runtime beta
+  default beta=1.0:   compiled=1.171303, raw=1.171303, diff=0.000e+00
+  baked  beta=0.3:  compiled=0.457774, raw=0.457774, diff=2.980e-08
+  baked  beta=0.7:  compiled=0.865505, raw=0.865505, diff=0.000e+00
+  baked  beta=2.5:  compiled=2.700294, raw=2.700294, diff=2.384e-07
+  [OK ] loss_compile matches raw reverse_KL for default and baked-in beta
+
+  13b. loss_compile_beta — runtime beta, single artifact across schedule
+  unique_graphs delta across 10 betas: 0  (expect 0 — single compiled artifact)
+  [OK ] one compiled graph reused across 10 betas; outputs match raw reverse_KL
+
+  13c. loss_compile / loss_compile_beta on OTFlow (closed-form trace in RK4 ODE)
+  loss_compile:  compiled=9.285211, eager=9.285211, diff=0.000e+00
+  loss_compile_beta: unique_graphs delta across 5 betas: 0  (expect 0)
+  backprop through compiled loss: 9/9 params have grad
+  [OK ] OTFlow compiles (no graph break / no per-beta recompile) and backprops
+
+────────────────────────────────────────────────────────────
+14. RealNVP with linear mixing (rotation / lu)
+────────────────────────────────────────────────────────────
+
+  --- mixing='rotation' ---
+  [OK ] 14a  F.inv(F(x)) ≈ x   (mixing=rotation): max |diff| = 2.384e-07  (atol=1e-05)
+  [OK ] 14b  zeros(): y ≈ x    (mixing=rotation): max |diff| = 0.000e+00  (atol=1e-05)
+  [OK ] 14b  zeros(): ladj ≈ 0 (mixing=rotation): max |diff| = 0.000e+00  (atol=1e-05)
+  [OK ] 14c  call_and_ladj ≈ slogdet (mixing=rotation): max |diff| = 7.898e-07  (atol=0.0001)
+  14d  27/27 parameter tensors have non-None grad   (mixing=rotation)
+  [OK ] 14f  captured F sees param updates: y    (mixing=rotation): max |diff| = 0.000e+00  (atol=1e-06)
+  [OK ] 14f  captured F sees param updates: ladj (mixing=rotation): max |diff| = 0.000e+00  (atol=1e-06)
+
+  --- mixing='lu' ---
+  [OK ] 14a  F.inv(F(x)) ≈ x   (mixing=lu): max |diff| = 2.384e-07  (atol=1e-05)
+  [OK ] 14b  zeros(): y ≈ x    (mixing=lu): max |diff| = 0.000e+00  (atol=1e-05)
+  [OK ] 14b  zeros(): ladj ≈ 0 (mixing=lu): max |diff| = 0.000e+00  (atol=1e-05)
+  [OK ] 14c  call_and_ladj ≈ slogdet (mixing=lu): max |diff| = 2.980e-08  (atol=0.0001)
+  14d  27/27 parameter tensors have non-None grad   (mixing=lu)
+  [OK ] 14f  captured F sees param updates: y    (mixing=lu): max |diff| = 0.000e+00  (atol=1e-06)
+  [OK ] 14f  captured F sees param updates: ladj (mixing=lu): max |diff| = 0.000e+00  (atol=1e-06)
+
+  --- 14e  lu mixing contributes a non-trivial log|det| after one Adam step ---
+  built 3 lu mixing layers (expected 3 = transforms-1)
+  max |LU.weight - I| after step = 1.000e-01
+  total flow ladj on test point   = -1.993e+00
+  [OK ] lu mixing layers produce a non-trivial log|det| after training
+
+  --- 14h  LULinearTransform near-singular |diag(L)| ladj stays finite ---
+  healthy LU ladj:           0.0000e+00  (expect 0)
+  near-singular LU ladj:     -2.7631e+01  (large -ve, finite)
+  [OK ] LULinearTransform clamp keeps ladj / y finite when diag(L) -> 0
+
+────────────────────────────────────────────────────────────
+14g. OT_loss = reverse_KL + OT regularizers (OTFlow)
+────────────────────────────────────────────────────────────
+  [OK ] 14g  OT_loss(alpha_C=alpha_R=0) == reverse_KL: max |diff| = 0.000e+00  (atol=1e-05)
+  transport cost C: mean=2.0844, min=6.195e-02 (>=0)
+  HJB residual  R: mean=3.1118, min=1.657e+00 (>=0)
+  OT_loss(full)=13.816789, reverse_KL=8.620663
+  [OK ] OT_loss decouples to reverse_KL and adds non-negative OT regularizers
+
+────────────────────────────────────────────────────────────
+15. Captured F sees param updates (NSF, CNF, OTFlow)
+────────────────────────────────────────────────────────────
+  [OK ] 15a  NSF captured F sees param updates: y: max |diff| = 0.000e+00  (atol=1e-06)
+  [OK ] 15a  NSF captured F sees param updates: ladj: max |diff| = 0.000e+00  (atol=1e-06)
+  [OK ] 15b  CNF captured F sees param updates: y: max |diff| = 0.000e+00  (atol=0.0001)
+  [OK ] 15b  CNF captured F sees param updates: ladj: max |diff| = 0.000e+00  (atol=0.0001)
+  [OK ] 15c  OTFlow captured F sees param updates: y: max |diff| = 0.000e+00  (atol=1e-06)
+  [OK ] 15c  OTFlow captured F sees param updates: ladj: max |diff| = 0.000e+00  (atol=1e-06)
+
+All flow verification checks passed.
+
+════════════════════════════════════════════════════════════
+A. Potential.enable_eval()  /  Potential.eval(x)
+════════════════════════════════════════════════════════════
+
+────────────────────────────────────────────────────────────
+A.1  enable_eval populates _eval_fn; eval() preserves nn.Module switch
+────────────────────────────────────────────────────────────
+  before enable_eval: _eval_fn is None = True
+  after  enable_eval: _eval_fn is None = False
+  second enable_eval keeps same closure: True
+  u.eval() (no x) returns self: True
+  u.eval() (no x) sets training=False: True
+  [OK ] structural state correct
+
+────────────────────────────────────────────────────────────
+A.2  u.eval(x) raises a clear RuntimeError without enable_eval()
+────────────────────────────────────────────────────────────
+  raised: Gaussian.eval(x) requires .enable_eval() first.
+  [OK ] rejected as expected
+
+────────────────────────────────────────────────────────────
+A.3  MALA routes U(x), U(y) through u._eval_fn  (count == 2 * iters)
+────────────────────────────────────────────────────────────
+  _eval_fn calls during MALA: 10  (expected 2 * iters = 10)
+  [OK ] _eval_fn count matches
+
+────────────────────────────────────────────────────────────
+A.4  MALA falls back to potential(x) when _eval_fn is None
+────────────────────────────────────────────────────────────
+  _eval_fn is None: True
+  langevin output shape: (64, 2)
+  [OK ] fallback path runs without error
+
+────────────────────────────────────────────────────────────
+A.5  same seed -> identical output with vs. without enable_eval
+────────────────────────────────────────────────────────────
+  max |y_with_eval - y_without_eval| = 0.000e+00
+  [OK ] fast path is a pure speed optimization
+
+════════════════════════════════════════════════════════════
+B. linear_combination potential under Langevin sampling
+════════════════════════════════════════════════════════════
+
+────────────────────────────────────────────────────────────
+B.1  Run Langevin on ulc, collect snapshots, check moments
+────────────────────────────────────────────────────────────
+  collected samples shape: (32000, 2)
+  per-axis mean = ['+0.056', '+0.011']   (target ~[0, 0])
+  per-axis std  = ['1.977', '0.999']    (target ~[*,  1])
+
+────────────────────────────────────────────────────────────
+B.2  Save scatter plot for visual sanity
+────────────────────────────────────────────────────────────
+  scatter saved → /mnt/projects/zflows/tests/_verify_potential.png
+
+────────────────────────────────────────────────────────────
+B.3  linear_combination coeffs always normalise to list[float]
+────────────────────────────────────────────────────────────
+  tensor input:                  coeffs = [0.30000001192092896, 0.699999988079071]
+  requires_grad=True tensor:     coeffs = [0.30000001192092896, 0.699999988079071]
+  default (None) for N=2:        coeffs = [0.5, 0.5]
+  [OK ] coeffs always normalised to list[float]
+
+────────────────────────────────────────────────────────────
+B.4  linear_combination.set_coeffs in-place update
+────────────────────────────────────────────────────────────
+  list / tuple / tensor / grad tensor -> list[float]:  OK
+  returns self (chainable):                            OK
+  None rejected, length mismatch rejected:             OK
+  set_coeffs([1, 0]) collapses forward to U_a:         err = 0.000e+00
+  set_coeffs == fresh ctor (no stale state):           err = 0.000e+00
+  [OK ] set_coeffs updates in place and forward reflects it
+
+────────────────────────────────────────────────────────────
+B.5  linear_combination: __init__-linked closures, child-level runtime gate
+────────────────────────────────────────────────────────────
+  __init__ links combined _grad_fn / _eval_fn (children cold):  OK
+  runtime gate fires at child level:  grad -> Gaussian.grad(), eval -> Gaussian.eval(x)
+  enable_grad / enable_eval propagate to children, don't touch self._*:  OK
+  closure correctness vs autograd / forward:  grad err = 0.000e+00, eval err = 0.000e+00
+  set_coeffs preserves all id()s; closure reads new coeffs:    grad err = 0.000e+00, eval err = 0.000e+00
+  set_coeffs rejects enable_grad / enable_eval kwargs:          OK
+  enable_grad / enable_eval propagate; hot children preserved:  OK
+  linear_combination of pre-enabled children works immediately:
+    .grad(x) err = 0.000e+00, .eval(x) err = 0.000e+00  (no lc.enable_*() needed)
+  [OK ] __init__-linked closures + child-level runtime gate working as specified
+
+════════════════════════════════════════════════════════════
+C. Gaussian.samples — tempered draws from N(mean, var / beta)
+════════════════════════════════════════════════════════════
+
+────────────────────────────────────────────────────────────
+C.1  default vs beta=1.0 is byte-identical
+────────────────────────────────────────────────────────────
+  equal = True
+  [OK ] defaults match explicit beta=1.0
+
+────────────────────────────────────────────────────────────
+C.2  empirical per-axis variance scales as variance / beta
+────────────────────────────────────────────────────────────
+  beta = 0.5:  var = [2.0050692558288574, 7.986507892608643, 0.4966146647930145]   (expect [2.0, 8.0, 0.5])   max err = 1.349e-02
+  beta = 1.0:  var = [1.0046970844268799, 4.006204605102539, 0.25261980295181274]   (expect [1.0, 4.0, 0.25])   max err = 6.205e-03
+  beta = 4.0:  var = [0.2524320185184479, 1.014249324798584, 0.06280533224344254]   (expect [0.25, 1.0, 0.0625])   max err = 1.425e-02
+  [OK ] tempered variance contracts as 1/beta
+
+════════════════════════════════════════════════════════════
+D. potential_from(fn) wraps a stateless callable into an instance
+════════════════════════════════════════════════════════════
+
+────────────────────────────────────────────────────────────
+D.1  potential_from(fn) returns an instance; instance(x) ≡ fn(x)
+────────────────────────────────────────────────────────────
+  max |potential_from(fn)(x) - fn(x)| = 0.000e+00
+  [OK ] potential_from yields a Potential instance with matching forward
+
+────────────────────────────────────────────────────────────
+D.2  enable_eval / enable_grad work on the wrapped Potential instance
+────────────────────────────────────────────────────────────
+  max |u.eval(x) - fn(x)| = 4.768e-07
+  max |u.grad(x) - autograd(fn)| = 0.000e+00
+  [OK ] compiled grad / eval fast paths match autograd / fn(x)
+
+All potential verification checks passed.
+W0528 14:23:25.626000 207601 /home/xuda/.envs/torch/lib/python3.14/site-packages/torch/_inductor/cudagraph_utils.py:434] [__cudagraphs] CUDAGraph supports dynamic shapes by recording a new graph for each distinct input size. Recording too many CUDAGraphs may lead to extra overhead. We have observed 9 distinct sizes. Please consider the following options for better performance: a) padding inputs to a few fixed number of shapes; or b) set torch._inductor.config.triton.cudagraph_skip_dynamic_graphs=True. Set torch._inductor.config.triton.cudagraph_dynamic_shape_warn_limit=None to silence this warning.
+
+════════════════════════════════════════════════════════════
+A. Tamed Langevin on U(x) = ||x||^4 / 4  (cubic gradient)
+════════════════════════════════════════════════════════════
+
+────────────────────────────────────────────────────────────
+A.1  plain ULA (taming=0) blows up
+────────────────────────────────────────────────────────────
+  NaN/Inf particles: 512 / 512
+  max ||y|| (finite particles only): nan
+  [OK ] ULA is unstable, as expected
+
+────────────────────────────────────────────────────────────
+A.2  tamed ULA (taming=0.1) stays bounded
+────────────────────────────────────────────────────────────
+  NaN/Inf particles: 0 / 512
+  max  ||y||: 3.999e+00
+  mean ||y||: 1.280e+00
+  [OK ] tamed chain stays bounded
+
+────────────────────────────────────────────────────────────
+A.3  adjust=True together with taming>0 raises ValueError
+────────────────────────────────────────────────────────────
+  raised: langevin(): adjust=True and taming>0 are mutually exclusive.
+  [OK ] rejected as expected
+
+────────────────────────────────────────────────────────────
+A.4  beta=1.0 reproduces default; beta>1 tightens the cloud
+────────────────────────────────────────────────────────────
+  ULA  default vs beta=1.0: equal=True
+  MALA default vs beta=1.0: equal=True
+  MALA stationary var:  beta=1.0 -> 0.9974 (expect ~1.00)
+                        beta=4.0 -> 0.2466 (expect ~0.25)
+  [OK ] beta=1.0 bit-compatible; beta=4.0 contracts variance 4x
+
+════════════════════════════════════════════════════════════
+B. HMC: invariance, convergence, NaN guard, chunk, super-linear
+════════════════════════════════════════════════════════════
+
+────────────────────────────────────────────────────────────
+B.1  start at N(0, I), stay at N(0, I)
+────────────────────────────────────────────────────────────
+  before: mean = ['+0.001', '-0.004'], std = ['1.001', '1.009']
+   after: mean = ['+0.008', '-0.007'], std = ['1.001', '0.998']
+  [OK ] invariance preserved
+
+────────────────────────────────────────────────────────────
+B.2  broad N(0, 25 I) init pulls onto N(0, I)
+────────────────────────────────────────────────────────────
+  before: mean = ['-0.071', '-0.192'], std = ['4.973', '5.031']
+   after: mean = ['-0.013', '+0.002'], std = ['0.994', '0.989']
+  [OK ] broad cloud contracts onto target
+
+────────────────────────────────────────────────────────────
+B.3  anisotropic target (variance ratio 4:1) — per-axis std
+────────────────────────────────────────────────────────────
+  per-axis std = ['2.000', '1.002']   (target [2.000, 1.000])
+  [OK ] both axes mix correctly
+
+────────────────────────────────────────────────────────────
+B.4  huge step rejects every trajectory, no NaN leaks
+────────────────────────────────────────────────────────────
+  fraction finite = 1.0000
+  max |x|         = 0.0000  (0.0 = every trajectory rejected)
+  [OK ] divergent leapfrog rejected, chain finite
+
+────────────────────────────────────────────────────────────
+B.5  hmc() raises RuntimeError without enable_grad()
+────────────────────────────────────────────────────────────
+  raised: hmc() requires gradients on the potential; call Gaussian.enable_grad() before passing it in.
+  [OK ] rejected as expected
+
+────────────────────────────────────────────────────────────
+B.6  chunk statistically matches chunk=1 (aggregate moments)
+────────────────────────────────────────────────────────────
+  max |mean(chunk=1) - mean(chunk=4)| = 0.0131
+  max |std (chunk=1) - std (chunk=4)| = 0.0133
+  [OK ] chunk produces statistically equivalent samples
+
+────────────────────────────────────────────────────────────
+B.7  hmc() falls back to potential(x) without enable_eval()
+────────────────────────────────────────────────────────────
+  fallback path: mean = ['+0.005', '-0.017'], std = ['0.999', '0.992']
+  [OK ] fallback produces correct samples
+
+────────────────────────────────────────────────────────────
+B.8  U(x) = x^4 / 4 (cubic gradient): sampling + tail rejection
+────────────────────────────────────────────────────────────
+  target std (analytic)       = 0.8222
+  sampled std after HMC       = 0.8212
+  sampled mean after HMC      = +0.0028
+  fraction finite             = 1.0000
+  aggressive-step tail: finite = 1.0000, stuck at x_start = 1.0000
+  [OK ] super-linear chain sampled + tail rejected
+
+────────────────────────────────────────────────────────────
+B.9  beta=1.0 reproduces default; beta>1 tightens the cloud
+────────────────────────────────────────────────────────────
+  HMC default vs beta=1.0: equal=True
+  HMC stationary var:  beta=1.0 -> 0.9967 (expect ~1.00)
+                       beta=4.0 -> 0.2497 (expect ~0.25)
+  [OK ] beta=1.0 bit-compatible; beta=4.0 contracts variance 4x
+
+════════════════════════════════════════════════════════════
+C. L-BFGS: well/ill-conditioned, chunk-determinism, Armijo, alias
+════════════════════════════════════════════════════════════
+
+────────────────────────────────────────────────────────────
+C.1  lbfgs reaches ~fp32 precision in ~30 iters
+────────────────────────────────────────────────────────────
+  init max err: 2.265e+01
+  lbfgs ( 30 iters) max err: 0.000e+00
+  [OK ] superlinear convergence on isotropic Gaussian
+
+────────────────────────────────────────────────────────────
+C.2  ill-conditioned diag Gaussian (kappa=100)
+────────────────────────────────────────────────────────────
+  init max err: 2.160e+01
+  lbfgs ( 50 iters) max err: 4.363e-05
+  [OK ] curvature pairs handle kappa=100
+
+────────────────────────────────────────────────────────────
+C.3  chunk > 1 gives identical output to chunk == 1
+────────────────────────────────────────────────────────────
+  max |y_chunk1 - y_chunk4| = 0.000e+00
+  [OK ] bit-identical across chunkings
+
+────────────────────────────────────────────────────────────
+C.4  lbfgs() raises RuntimeError without enable_grad()
+────────────────────────────────────────────────────────────
+  raised: lbfgs() requires gradients on the potential; call Gaussian.enable_grad() before passing it in.
+  [OK ] rejected as expected
+
+────────────────────────────────────────────────────────────
+C.5  armijo line search — gating, convergence, monotonicity
+────────────────────────────────────────────────────────────
+  no-enable_eval raised: lbfgs(armijo=True) needs the compiled forward fast path; call Gaussian.enable_eval() before passing it in.
+  armijo=True ( 30 iters) max ||y - x*||: 0.000e+00
+  worst U_after - U_before across 20 single-iter steps: 0.000e+00
+  [OK ] gating + convergence + monotonicity all hold
+
+────────────────────────────────────────────────────────────
+C.6  optimization is an alias of lbfgs
+────────────────────────────────────────────────────────────
+  optimization is lbfgs: True
+  [OK ] alias confirmed
+
+════════════════════════════════════════════════════════════
+D. importance_weights / _log: defaults + beta linearity
+════════════════════════════════════════════════════════════
+
+────────────────────────────────────────────────────────────
+D.1  default vs beta_source=beta_target=1.0 is byte-identical
+────────────────────────────────────────────────────────────
+  log:     equal = True
+  linear:  equal = True
+  [OK ] defaults match explicit (1.0, 1.0)
+
+────────────────────────────────────────────────────────────
+D.2  linearity:  d(log w)/d(beta_t) = -target(y),  d(log w)/d(beta_s) = +source(x)
+────────────────────────────────────────────────────────────
+  beta_target 1->2:  max |diff + target(y)| = 1.907e-06
+  beta_source 1->2:  max |diff - source(x)| = 4.768e-07
+  [OK ] log-weights linear in each beta with correct sign
+
+────────────────────────────────────────────────────────────
+D.3  importance_weights forwards betas to importance_weights_log
+────────────────────────────────────────────────────────────
+  max |w_actual - w_expected| = 0.000e+00
+  [OK ] kwargs reach the log-space implementation
+
+════════════════════════════════════════════════════════════
+E. stochastic_heun: convergence, beta, lower bias than ULA, gating
+════════════════════════════════════════════════════════════
+
+────────────────────────────────────────────────────────────
+E.1  broad init pulls onto target; anisotropic axes mix
+────────────────────────────────────────────────────────────
+   mean = ['+1.008', '-1.970']   (target [+1.000, -2.000])
+   std  = ['1.004', '2.019']   (target [1.000, 2.000])
+  [OK ] both axes converge to the correct moments
+
+────────────────────────────────────────────────────────────
+E.2  beta scales stationary variance as 1/beta
+────────────────────────────────────────────────────────────
+  stationary var:  beta=1.0 -> 1.0101 (expect ~1.00)
+                   beta=4.0 -> 0.2496 (expect ~0.25)
+  [OK ] beta=4.0 contracts variance 4x
+
+────────────────────────────────────────────────────────────
+E.3  lower discretization bias than Euler-Maruyama at matched step
+────────────────────────────────────────────────────────────
+  Euler-Maruyama (ULA) stationary var = 1.1038  (|bias| = 0.1038, analytic 1.1111)
+  stochastic Heun      stationary var = 0.9827  (|bias| = 0.0173)
+  [OK ] Heun more than halves the Euler-Maruyama variance bias
+
+────────────────────────────────────────────────────────────
+E.4  stochastic_heun() raises RuntimeError without enable_grad()
+────────────────────────────────────────────────────────────
+  raised: stochastic_heun() requires gradients on the potential; call Gaussian.enable_grad() before passing it in.
+  [OK ] rejected as expected
+
+────────────────────────────────────────────────────────────
+E.5  chunk statistically matches chunk=1 (aggregate moments)
+────────────────────────────────────────────────────────────
+  max |mean(chunk=1) - mean(chunk=4)| = 0.0073
+  max |std (chunk=1) - std (chunk=4)| = 0.0099
+  [OK ] chunk produces statistically equivalent samples
+
+All utils verification checks passed.
+epoch   1/30   KL_loss = 2.841493
+epoch   2/30   KL_loss = 2.602193
+epoch   3/30   KL_loss = 2.427602
+epoch   4/30   KL_loss = 2.266984
+epoch   5/30   KL_loss = 1.983757
+epoch   6/30   KL_loss = 1.750436
+epoch   7/30   KL_loss = 1.571474
+epoch   8/30   KL_loss = 1.498145
+epoch   9/30   KL_loss = 1.334897
+epoch  10/30   KL_loss = 1.213665
+epoch  11/30   KL_loss = 1.154336
+epoch  12/30   KL_loss = 1.114944
+epoch  13/30   KL_loss = 1.087289
+epoch  14/30   KL_loss = 1.059232
+epoch  15/30   KL_loss = 1.032081
+epoch  16/30   KL_loss = 1.030660
+epoch  17/30   KL_loss = 1.011976
+epoch  18/30   KL_loss = 1.010846
+epoch  19/30   KL_loss = 0.984037
+epoch  20/30   KL_loss = 0.973605
+epoch  21/30   KL_loss = 0.966456
+epoch  22/30   KL_loss = 0.953150
+epoch  23/30   KL_loss = 0.953603
+epoch  24/30   KL_loss = 0.950743
+epoch  25/30   KL_loss = 0.937995
+epoch  26/30   KL_loss = 0.917165
+epoch  27/30   KL_loss = 0.911854
+epoch  28/30   KL_loss = 0.902399
+epoch  29/30   KL_loss = 0.912897
+epoch  30/30   KL_loss = 0.898857
+
+round-trip error on anchors: max |x - F(F^-1(x))| = 1.431e-06
+epoch   1/20   KL_loss = 1.716996
+epoch   2/20   KL_loss = 0.865786
+epoch   3/20   KL_loss = 0.618621
+epoch   4/20   KL_loss = 0.470018
+epoch   5/20   KL_loss = 0.388612
+epoch   6/20   KL_loss = 0.339881
+epoch   7/20   KL_loss = 0.300998
+epoch   8/20   KL_loss = 0.282230
+epoch   9/20   KL_loss = 0.270683
+epoch  10/20   KL_loss = 0.259342
+epoch  11/20   KL_loss = 0.254843
+epoch  12/20   KL_loss = 0.249063
+epoch  13/20   KL_loss = 0.243422
+epoch  14/20   KL_loss = 0.243722
+epoch  15/20   KL_loss = 0.239946
+epoch  16/20   KL_loss = 0.236099
+epoch  17/20   KL_loss = 0.234523
+epoch  18/20   KL_loss = 0.231391
+epoch  19/20   KL_loss = 0.229477
+epoch  20/20   KL_loss = 0.230714
+epoch   1/10   KL_loss = 2.050954
+epoch   2/10   KL_loss = 1.717218
+epoch   3/10   KL_loss = 1.669114
+epoch   4/10   KL_loss = 1.652115
+epoch   5/10   KL_loss = 1.643559
+epoch   6/10   KL_loss = 1.639196
+epoch   7/10   KL_loss = 1.636901
+epoch   8/10   KL_loss = 1.634710
+epoch   9/10   KL_loss = 1.633286
+epoch  10/10   KL_loss = 1.632954
+ESS = 0.9864
+epoch   1/50   KL_loss = 0.362462
+epoch   2/50   KL_loss = 0.148450
+epoch   3/50   KL_loss = 0.090038
+epoch   4/50   KL_loss = 0.039337
+epoch   5/50   KL_loss = -0.082527
+epoch   6/50   KL_loss = -0.130748
+epoch   7/50   KL_loss = -0.217576
+epoch   8/50   KL_loss = -0.313571
+epoch   9/50   KL_loss = -0.404962
+epoch  10/50   KL_loss = -0.460776
+epoch  11/50   KL_loss = -0.499329
+epoch  12/50   KL_loss = -0.511533
+epoch  13/50   KL_loss = -0.553787
+epoch  14/50   KL_loss = -0.575621
+epoch  15/50   KL_loss = -0.603925
+epoch  16/50   KL_loss = -0.636535
+epoch  17/50   KL_loss = -0.679749
+epoch  18/50   KL_loss = -0.705673
+epoch  19/50   KL_loss = -0.722855
+epoch  20/50   KL_loss = -0.726873
+epoch  21/50   KL_loss = -0.710682
+epoch  22/50   KL_loss = -0.728248
+epoch  23/50   KL_loss = -0.733729
+epoch  24/50   KL_loss = -0.754036
+epoch  25/50   KL_loss = -0.759226
+epoch  26/50   KL_loss = -0.774979
+epoch  27/50   KL_loss = -0.772348
+epoch  28/50   KL_loss = -0.775445
+epoch  29/50   KL_loss = -0.781504
+epoch  30/50   KL_loss = -0.787156
+epoch  31/50   KL_loss = -0.777004
+epoch  32/50   KL_loss = -0.781463
+epoch  33/50   KL_loss = -0.787947
+epoch  34/50   KL_loss = -0.793322
+epoch  35/50   KL_loss = -0.798097
+epoch  36/50   KL_loss = -0.799425
+epoch  37/50   KL_loss = -0.799462
+epoch  38/50   KL_loss = -0.802237
+epoch  39/50   KL_loss = -0.802565
+epoch  40/50   KL_loss = -0.803860
+epoch  41/50   KL_loss = -0.808108
+epoch  42/50   KL_loss = -0.808223
+epoch  43/50   KL_loss = -0.810328
+epoch  44/50   KL_loss = -0.810918
+epoch  45/50   KL_loss = -0.812300
+epoch  46/50   KL_loss = -0.812815
+epoch  47/50   KL_loss = -0.813320
+epoch  48/50   KL_loss = -0.813677
+epoch  49/50   KL_loss = -0.813878
+epoch  50/50   KL_loss = -0.813958
+epoch   1/20   KL_loss = -3.068975
+epoch   2/20   KL_loss = -3.243301
+epoch   3/20   KL_loss = -3.310871
+epoch   4/20   KL_loss = -3.347718
+epoch   5/20   KL_loss = -3.367982
+epoch   6/20   KL_loss = -3.384497
+epoch   7/20   KL_loss = -3.401440
+epoch   8/20   KL_loss = -3.412541
+epoch   9/20   KL_loss = -3.424492
+epoch  10/20   KL_loss = -3.433369
+epoch  11/20   KL_loss = -3.441934
+epoch  12/20   KL_loss = -3.446938
+epoch  13/20   KL_loss = -3.453071
+epoch  14/20   KL_loss = -3.455131
+epoch  15/20   KL_loss = -3.457554
+epoch  16/20   KL_loss = -3.460170
+epoch  17/20   KL_loss = -3.462942
+epoch  18/20   KL_loss = -3.466419
+epoch  19/20   KL_loss = -3.469391
+epoch  20/20   KL_loss = -3.470782
+ESS = 0.8286
+=== step 1/12   c_0 = 0.000  ->  c_1 = 0.083 ===
+  epoch   5/40   KL_loss = 3.245487
+  epoch  10/40   KL_loss = 3.221876
+  epoch  15/40   KL_loss = 3.295296
+  epoch  20/40   KL_loss = 3.204439
+  epoch  25/40   KL_loss = 3.187175
+  epoch  30/40   KL_loss = 3.182063
+  epoch  35/40   KL_loss = 3.168288
+  epoch  40/40   KL_loss = 3.336394
+  ESS = 0.6782
+=== step 2/12   c_1 = 0.083  ->  c_2 = 0.167 ===
+  epoch   5/40   KL_loss = 4.179124
+  epoch  10/40   KL_loss = 4.101240
+  epoch  15/40   KL_loss = 4.061813
+  epoch  20/40   KL_loss = 4.057397
+  epoch  25/40   KL_loss = 4.045794
+  epoch  30/40   KL_loss = 4.042275
+  epoch  35/40   KL_loss = 4.039885
+  epoch  40/40   KL_loss = 4.038292
+  ESS = 0.9646
+=== step 3/12   c_2 = 0.167  ->  c_3 = 0.250 ===
+  epoch   5/40   KL_loss = 4.361495
+  epoch  10/40   KL_loss = 4.356842
+  epoch  15/40   KL_loss = 4.354191
+  epoch  20/40   KL_loss = 4.352172
+  epoch  25/40   KL_loss = 4.350549
+  epoch  30/40   KL_loss = 4.349219
+  epoch  35/40   KL_loss = 4.347931
+  epoch  40/40   KL_loss = 4.346785
+  ESS = 0.9643
+=== step 4/12   c_3 = 0.250  ->  c_4 = 0.333 ===
+  epoch   5/40   KL_loss = 4.314393
+  epoch  10/40   KL_loss = 4.310114
+  epoch  15/40   KL_loss = 4.307737
+  epoch  20/40   KL_loss = 4.306475
+  epoch  25/40   KL_loss = 4.305202
+  epoch  30/40   KL_loss = 4.304460
+  epoch  35/40   KL_loss = 4.303994
+  epoch  40/40   KL_loss = 4.302275
+  ESS = 0.9641
+=== step 5/12   c_4 = 0.333  ->  c_5 = 0.417 ===
+  epoch   5/40   KL_loss = 4.132586
+  epoch  10/40   KL_loss = 4.128278
+  epoch  15/40   KL_loss = 4.126156
+  epoch  20/40   KL_loss = 4.124782
+  epoch  25/40   KL_loss = 4.123728
+  epoch  30/40   KL_loss = 4.122747
+  epoch  35/40   KL_loss = 4.121716
+  epoch  40/40   KL_loss = 4.121942
+  ESS = 0.9604
+=== step 6/12   c_5 = 0.417  ->  c_6 = 0.500 ===
+  epoch   5/40   KL_loss = 3.904679
+  epoch  10/40   KL_loss = 3.899105
+  epoch  15/40   KL_loss = 3.897924
+  epoch  20/40   KL_loss = 3.897364
+  epoch  25/40   KL_loss = 3.894922
+  epoch  30/40   KL_loss = 3.894585
+  epoch  35/40   KL_loss = 3.893563
+  epoch  40/40   KL_loss = 3.892922
+  ESS = 0.9566
+=== step 7/12   c_6 = 0.500  ->  c_7 = 0.583 ===
+  epoch   5/40   KL_loss = 3.642768
+  epoch  10/40   KL_loss = 3.638393
+  epoch  15/40   KL_loss = 3.636895
+  epoch  20/40   KL_loss = 3.636233
+  epoch  25/40   KL_loss = 3.633798
+  epoch  30/40   KL_loss = 3.632961
+  epoch  35/40   KL_loss = 3.632944
+  epoch  40/40   KL_loss = 3.631718
+  ESS = 0.9615
+=== step 8/12   c_7 = 0.583  ->  c_8 = 0.667 ===
+  epoch   5/40   KL_loss = 3.405456
+  epoch  10/40   KL_loss = 3.401943
+  epoch  15/40   KL_loss = 3.399961
+  epoch  20/40   KL_loss = 3.398866
+  epoch  25/40   KL_loss = 3.398113
+  epoch  30/40   KL_loss = 3.396659
+  epoch  35/40   KL_loss = 3.395820
+  epoch  40/40   KL_loss = 3.395559
+  ESS = 0.9615
+=== step 9/12   c_8 = 0.667  ->  c_9 = 0.750 ===
+  epoch   5/40   KL_loss = 3.155115
+  epoch  10/40   KL_loss = 3.151515
+  epoch  15/40   KL_loss = 3.150123
+  epoch  20/40   KL_loss = 3.148607
+  epoch  25/40   KL_loss = 3.148041
+  epoch  30/40   KL_loss = 3.146454
+  epoch  35/40   KL_loss = 3.145974
+  epoch  40/40   KL_loss = 3.144851
+  ESS = 0.9650
+=== step 10/12   c_9 = 0.750  ->  c_10 = 0.833 ===
+  epoch   5/40   KL_loss = 2.888715
+  epoch  10/40   KL_loss = 2.883976
+  epoch  15/40   KL_loss = 2.883135
+  epoch  20/40   KL_loss = 2.882075
+  epoch  25/40   KL_loss = 2.881105
+  epoch  30/40   KL_loss = 2.880174
+  epoch  35/40   KL_loss = 2.878643
+  epoch  40/40   KL_loss = 2.877951
+  ESS = 0.9665
+=== step 11/12   c_10 = 0.833  ->  c_11 = 0.917 ===
+  epoch   5/40   KL_loss = 2.646496
+  epoch  10/40   KL_loss = 2.644645
+  epoch  15/40   KL_loss = 2.642346
+  epoch  20/40   KL_loss = 2.641048
+  epoch  25/40   KL_loss = 2.639481
+  epoch  30/40   KL_loss = 2.639477
+  epoch  35/40   KL_loss = 2.638782
+  epoch  40/40   KL_loss = 2.637257
+  ESS = 0.9653
+=== step 12/12   c_11 = 0.917  ->  c_12 = 1.000 ===
+  epoch   5/40   KL_loss = 2.389378
+  epoch  10/40   KL_loss = 2.387591
+  epoch  15/40   KL_loss = 2.384499
+  epoch  20/40   KL_loss = 2.382935
+  epoch  25/40   KL_loss = 2.382042
+  epoch  30/40   KL_loss = 2.381026
+  epoch  35/40   KL_loss = 2.380216
+  epoch  40/40   KL_loss = 2.378352
+  ESS = 0.9642
+saved 13 x_valid snapshots and 12 ESS values to /mnt/projects/zflows/tests/4D_Boltzmann_generator.pth
+
+ESS history (per anneal step):
+  step  1: ESS = 0.6782
+  step  2: ESS = 0.9646
+  step  3: ESS = 0.9643
+  step  4: ESS = 0.9641
+  step  5: ESS = 0.9604
+  step  6: ESS = 0.9566
+  step  7: ESS = 0.9615
+  step  8: ESS = 0.9615
+  step  9: ESS = 0.9650
+  step 10: ESS = 0.9665
+  step 11: ESS = 0.9653
+  step 12: ESS = 0.9642
+device: cuda  (NVIDIA GeForce RTX 5070 Ti)
+grid:   d ∈ [2, 4, 8, 16, 32], hidden_features ∈ [(64, 64), (128, 128), (256, 256)]
+setup:  bins=12, transforms=4, BATCH=2000, warmup=30, timed=100
+
+  d= 2, hf=(64, 64)      mode=raw                 6.033 ms/step
+  d= 2, hf=(64, 64)      mode=default             1.405 ms/step
+  d= 2, hf=(64, 64)      mode=reduce-overhead     0.495 ms/step
+  d= 2, hf=(128, 128)    mode=raw                 5.897 ms/step
+  d= 2, hf=(128, 128)    mode=default             1.443 ms/step
+  d= 2, hf=(128, 128)    mode=reduce-overhead     0.506 ms/step
+  d= 2, hf=(256, 256)    mode=raw                 6.313 ms/step
+  d= 2, hf=(256, 256)    mode=default             1.606 ms/step
+  d= 2, hf=(256, 256)    mode=reduce-overhead     0.649 ms/step
+  d= 4, hf=(64, 64)      mode=raw                 6.280 ms/step
+  d= 4, hf=(64, 64)      mode=default             1.523 ms/step
+  d= 4, hf=(64, 64)      mode=reduce-overhead     0.559 ms/step
+  d= 4, hf=(128, 128)    mode=raw                 5.684 ms/step
+  d= 4, hf=(128, 128)    mode=default             1.440 ms/step
+  d= 4, hf=(128, 128)    mode=reduce-overhead     0.521 ms/step
+  d= 4, hf=(256, 256)    mode=raw                 5.630 ms/step
+  d= 4, hf=(256, 256)    mode=default             1.421 ms/step
+  d= 4, hf=(256, 256)    mode=reduce-overhead     0.734 ms/step
+  d= 8, hf=(64, 64)      mode=raw                 5.376 ms/step
+  d= 8, hf=(64, 64)      mode=default             1.457 ms/step
+  d= 8, hf=(64, 64)      mode=reduce-overhead     0.556 ms/step
+  d= 8, hf=(128, 128)    mode=raw                 5.907 ms/step
+  d= 8, hf=(128, 128)    mode=default             1.441 ms/step
+  d= 8, hf=(128, 128)    mode=reduce-overhead     0.625 ms/step
+  d= 8, hf=(256, 256)    mode=raw                 6.157 ms/step
+  d= 8, hf=(256, 256)    mode=default             1.423 ms/step
+  d= 8, hf=(256, 256)    mode=reduce-overhead     0.915 ms/step
+  d=16, hf=(64, 64)      mode=raw                 7.560 ms/step
+  d=16, hf=(64, 64)      mode=default             1.487 ms/step
+  d=16, hf=(64, 64)      mode=reduce-overhead     0.680 ms/step
+  d=16, hf=(128, 128)    mode=raw                 7.837 ms/step
+  d=16, hf=(128, 128)    mode=default             1.328 ms/step
+  d=16, hf=(128, 128)    mode=reduce-overhead     0.799 ms/step
+  d=16, hf=(256, 256)    mode=raw                 7.503 ms/step
+  d=16, hf=(256, 256)    mode=default             1.340 ms/step
+  d=16, hf=(256, 256)    mode=reduce-overhead     1.094 ms/step
+  d=32, hf=(64, 64)      mode=raw                12.161 ms/step
+  d=32, hf=(64, 64)      mode=default             1.314 ms/step
+  d=32, hf=(64, 64)      mode=reduce-overhead     1.115 ms/step
+  d=32, hf=(128, 128)    mode=raw                12.591 ms/step
+  d=32, hf=(128, 128)    mode=default             1.416 ms/step
+  d=32, hf=(128, 128)    mode=reduce-overhead     1.353 ms/step
+  d=32, hf=(256, 256)    mode=raw                12.758 ms/step
+  d=32, hf=(256, 256)    mode=default             1.669 ms/step
+  d=32, hf=(256, 256)    mode=reduce-overhead     1.655 ms/step
+
+================================================================================================
+Per-step training latency (full forward + backward + Adam.step), mean over 100 steps
+================================================================================================
+  d | hidden_features |   raw ms | default ms |  reduce ms | speedup default | speedup reduce
+---------------------------------------------------------------------------------------------
+  2 | (64, 64)        |    6.033 |      1.405 |      0.495 |            4.30 |          12.18
+  2 | (128, 128)      |    5.897 |      1.443 |      0.506 |            4.09 |          11.66
+  2 | (256, 256)      |    6.313 |      1.606 |      0.649 |            3.93 |           9.72
+  4 | (64, 64)        |    6.280 |      1.523 |      0.559 |            4.12 |          11.24
+  4 | (128, 128)      |    5.684 |      1.440 |      0.521 |            3.95 |          10.92
+  4 | (256, 256)      |    5.630 |      1.421 |      0.734 |            3.96 |           7.67
+  8 | (64, 64)        |    5.376 |      1.457 |      0.556 |            3.69 |           9.68
+  8 | (128, 128)      |    5.907 |      1.441 |      0.625 |            4.10 |           9.45
+  8 | (256, 256)      |    6.157 |      1.423 |      0.915 |            4.33 |           6.73
+ 16 | (64, 64)        |    7.560 |      1.487 |      0.680 |            5.08 |          11.12
+ 16 | (128, 128)      |    7.837 |      1.328 |      0.799 |            5.90 |           9.80
+ 16 | (256, 256)      |    7.503 |      1.340 |      1.094 |            5.60 |           6.86
+ 32 | (64, 64)        |   12.161 |      1.314 |      1.115 |            9.26 |          10.91
+ 32 | (128, 128)      |   12.591 |      1.416 |      1.353 |            8.89 |           9.31
+ 32 | (256, 256)      |   12.758 |      1.669 |      1.655 |            7.64 |           7.71
+
+total benchmark wall time: 251.2 s
+csv saved → /mnt/projects/zflows/tests/compare_compiled_loss.csv
+  d= 4  CNF     ESS=0.8939  (13.4s)
+  d= 4  OTFlow  ESS=0.9823  (28.4s)
+  d= 8  CNF     ESS=0.8937  (13.0s)
+  d= 8  OTFlow  ESS=0.9774  (28.4s)
+  d=12  CNF     ESS=0.8729  (14.5s)
+  d=12  OTFlow  ESS=0.9735  (28.8s)
+  d=16  CNF     ESS=0.8667  (13.1s)
+  d=16  OTFlow  ESS=0.9505  (28.5s)
+  d=20  CNF     ESS=0.6762  (14.7s)
+  d=20  OTFlow  ESS=0.9575  (28.6s)
+  d=24  CNF     ESS=0.4425  (13.5s)
+  d=24  OTFlow  ESS=0.9621  (29.2s)
+
+=== Multi-well (8-mode) reverse-KL ESS: CNF vs OTFlow ===
+(NT=12, hidden=64, steps=500, batch=1024, well sep=1.5, barrier=1.5)
+
+flow          d=4      d=8     d=12     d=16     d=20     d=24
+--------------------------------------------------------------
+CNF        0.8939   0.8937   0.8729   0.8667   0.6762   0.4425
+OTFlow     0.9823   0.9774   0.9735   0.9505   0.9575   0.9621
+
+train seconds per cell:
+CNF       13.4179  12.9752  14.4579  13.1152  14.7194  13.5184
+OTFlow    28.3859  28.4355  28.8052  28.5407  28.6377  29.1730
+
+csv saved → /mnt/projects/zflows/tests/multi_well_compare.csv
+Discovered 11 scripts: ['_verify_flow', '_verify_potential', '_verify_utils', '2D_RealNVP_latent_interpolation', '2D_forward_KL', '2D_reverse_KL', '2D_two_moon_CNF', '3D_periodic', '4D_Boltzmann_generator', 'compare_compiled_loss', 'multi_well_compare']
+
+════════════════════════════════════════════════════════════════════════
+  python -m tests._verify_flow
+════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════
+  python -m tests._verify_potential
+════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════
+  python -m tests._verify_utils
+════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════
+  python -m tests.2D_RealNVP_latent_interpolation
+════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════
+  python -m tests.2D_forward_KL
+════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════
+  python -m tests.2D_reverse_KL
+════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════
+  python -m tests.2D_two_moon_CNF
+════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════
+  python -m tests.3D_periodic
+════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════
+  python -m tests.4D_Boltzmann_generator
+════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════
+  python -m tests.compare_compiled_loss
+════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════
+  python -m tests.multi_well_compare
+════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════
+Summary: 11 passed, 0 failed   (total 677.5 s)
+════════════════════════════════════════════════════════════════════════
+  PASS     62.8 s   _verify_flow
+  PASS     16.1 s   _verify_potential
+  PASS      7.2 s   _verify_utils
+  PASS      4.8 s   2D_RealNVP_latent_interpolation
+  PASS      4.7 s   2D_forward_KL
+  PASS      2.8 s   2D_reverse_KL
+  PASS     26.9 s   2D_two_moon_CNF
+  PASS     14.5 s   3D_periodic
+  PASS     25.7 s   4D_Boltzmann_generator
+  PASS    254.8 s   compare_compiled_loss
+  PASS    257.2 s   multi_well_compare
