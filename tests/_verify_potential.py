@@ -18,7 +18,11 @@ harness. Sections:
         - ulc(x) = c0 * U0(x) + c1 * U1(x)  is integrable, well-formed;
         - samples have sensible moments (per-axis mean / std finite);
         - scatter plot saved to tests/_verify_potential.png for visual
-          verification.
+          verification;
+        - B.3 / B.4: coeffs always normalise to list[float] across every
+          input form (list, tuple, 1-d Tensor, requires_grad=True, None),
+          and `set_coeffs` updates in place, returns self, rejects None
+          and length mismatches.
 
    C. Gaussian.samples(N, beta=...):
         - default vs beta=1.0 is byte-identical;
@@ -235,29 +239,186 @@ ulc.release()
 u0.release()
 u1.release()
 
-# B.3 — Linear_Combination rejects requires_grad=True tensor coeffs.
-# Buffer-registered coeffs are hidden from `optimizer.parameters()`; if the
-# user passes a tensor with grad tracking on, the optimizer would silently
-# never see the weights. The constructor must catch this up front.
-section("B.3  Linear_Combination guards against requires_grad=True coeffs")
+# B.3 — Linear_Combination normalises every coeff input to list[float].
+# Whatever the user passes (list, tuple, 1-d Tensor, requires_grad=True
+# tensor, None), `self.coeffs` must come out as a plain Python list of
+# floats — no buffers, no grad tracking, no device pinning. None defaults
+# to uniform 1/N.
+section("B.3  Linear_Combination coeffs always normalise to list[float]")
 u_a = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0], device=device)
 u_b = Gaussian(mean=[3.0, 3.0], variance=[1.0, 1.0], device=device)
-# (1) plain tensor with requires_grad=False is accepted (existing behavior).
-lc_ok = Linear_Combination([u_a, u_b], torch.tensor([0.3, 0.7], device=device))
-assert lc_ok.coeffs.requires_grad is False, "buffer coeffs should not track grad"
-# (2) requires_grad=True tensor must raise.
-raised = False
+# (1) plain tensor input -> list[float].
+lc_t = Linear_Combination([u_a, u_b], torch.tensor([0.3, 0.7], device=device))
+assert isinstance(lc_t.coeffs, list) and all(isinstance(c, float) for c in lc_t.coeffs), \
+    f"tensor input should normalise to list[float]; got {type(lc_t.coeffs).__name__}"
+assert abs(lc_t.coeffs[0] - 0.3) < 1e-6 and abs(lc_t.coeffs[1] - 0.7) < 1e-6
+# (2) requires_grad=True tensor is accepted too — detached on the way in.
+lc_g = Linear_Combination(
+    [u_a, u_b], torch.tensor([0.3, 0.7], device=device, requires_grad=True)
+)
+assert isinstance(lc_g.coeffs, list) and all(isinstance(c, float) for c in lc_g.coeffs)
+# (3) coeffs=None -> uniform 1/N.
+lc_d = Linear_Combination([u_a, u_b])
+assert lc_d.coeffs == [0.5, 0.5], f"default coeffs should be uniform 1/N, got {lc_d.coeffs}"
+print(f"  tensor input:                  coeffs = {lc_t.coeffs}")
+print(f"  requires_grad=True tensor:     coeffs = {lc_g.coeffs}")
+print(f"  default (None) for N=2:        coeffs = {lc_d.coeffs}")
+print("  [OK ] coeffs always normalised to list[float]")
+
+
+# B.4 — Linear_Combination.set_coeffs replaces the weights in place across
+# every accepted input form (list, tuple, 1-d Tensor, requires_grad=True
+# tensor), keeps `self.coeffs` as a plain list[float], returns self for
+# chaining, rejects None and length mismatches, and the next forward
+# call reflects the new mix exactly.
+section("B.4  Linear_Combination.set_coeffs in-place update")
+u_a2 = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0], device=device)
+u_b2 = Gaussian(mean=[3.0, 3.0], variance=[1.0, 1.0], device=device)
+lc = Linear_Combination([u_a2, u_b2])
+assert lc.coeffs == [0.5, 0.5], f"init should be uniform 1/N, got {lc.coeffs}"
+
+# (1) list / tuple / tensor inputs all land as list[float].
+lc.set_coeffs([0.2, 0.8])
+assert lc.coeffs == [0.2, 0.8]
+lc.set_coeffs((0.4, 0.6))
+assert lc.coeffs == [0.4, 0.6]
+lc.set_coeffs(torch.tensor([0.1, 0.9], device=device))
+assert isinstance(lc.coeffs, list) and all(isinstance(c, float) for c in lc.coeffs)
+assert abs(lc.coeffs[0] - 0.1) < 1e-6 and abs(lc.coeffs[1] - 0.9) < 1e-6
+
+# (2) requires_grad=True tensor is detached, never stored as a Tensor.
+lc.set_coeffs(torch.tensor([0.3, 0.7], device=device, requires_grad=True))
+assert isinstance(lc.coeffs, list)
+assert not any(isinstance(c, torch.Tensor) for c in lc.coeffs)
+
+# (3) returns self -> chainable.
+ret = lc.set_coeffs([0.5, 0.5])
+assert ret is lc, "set_coeffs should return self for chaining"
+
+# (4) None is rejected.
+raised_none = False
 try:
-    Linear_Combination([u_a, u_b], torch.tensor([0.3, 0.7], device=device, requires_grad=True))
+    lc.set_coeffs(None)
 except AssertionError as e:
-    raised = True
-    msg = str(e)
-assert raised, "Linear_Combination should reject requires_grad=True coeffs"
-assert "requires" in msg.lower() or "grad" in msg.lower(), \
-    f"rejection message should mention grad / requires_grad, got: {msg}"
-print(f"  plain tensor accepted:               coeffs.requires_grad = False")
-print(f"  requires_grad=True tensor rejected:  {msg.splitlines()[0][:80]}...")
-print("  [OK ] grad-tracking coeffs caught at construction")
+    raised_none = True
+    msg_none = str(e)
+assert raised_none and "None" in msg_none, \
+    f"set_coeffs(None) should raise mentioning None; got: {msg_none if raised_none else 'no error'}"
+
+# (5) length mismatch is rejected.
+raised_len = False
+try:
+    lc.set_coeffs([0.3, 0.3, 0.4])
+except AssertionError as e:
+    raised_len = True
+    msg_len = str(e)
+assert raised_len and "2" in msg_len and "3" in msg_len, \
+    f"set_coeffs length-mismatch should mention sizes; got: {msg_len if raised_len else 'no error'}"
+
+# (6) forward reflects the update — set_coeffs([1, 0]) collapses to U_a alone.
+x_lc = torch.randn(64, 2, device=device)
+lc.set_coeffs([1.0, 0.0])
+out_collapsed = lc(x_lc)
+out_ua = u_a2(x_lc)
+err_collapsed = (out_collapsed - out_ua).abs().max().item()
+assert err_collapsed == 0.0, f"forward after set_coeffs([1, 0]) should equal U_a; err = {err_collapsed}"
+
+# (7) re-mixing is bit-identical to constructing a fresh Linear_Combination
+#     with the same coeffs (i.e. set_coeffs leaves no stale state behind).
+lc.set_coeffs([0.35, 0.65])
+lc_fresh = Linear_Combination([u_a2, u_b2], [0.35, 0.65])
+err_fresh = (lc(x_lc) - lc_fresh(x_lc)).abs().max().item()
+assert err_fresh == 0.0, f"set_coeffs vs fresh ctor mismatch: {err_fresh}"
+
+print(f"  list / tuple / tensor / grad tensor -> list[float]:  OK")
+print(f"  returns self (chainable):                            OK")
+print(f"  None rejected, length mismatch rejected:             OK")
+print(f"  set_coeffs([1, 0]) collapses forward to U_a:         err = {err_collapsed:.3e}")
+print(f"  set_coeffs == fresh ctor (no stale state):           err = {err_fresh:.3e}")
+print("  [OK ] set_coeffs updates in place and forward reflects it")
+
+
+# B.5 — set_coeffs invalidates `_grad_fn` / `_eval_fn` and respects
+# `enable_grad` / `enable_eval`. Sequence:
+#   1. enable_grad + enable_eval populate both compiled paths;
+#   2. set_coeffs(..., enable_grad=False, enable_eval=False) -> both
+#      fields are cleared, .grad(x) / .eval(x) raise until re-enabled;
+#   3. set_coeffs(..., enable_grad=True)  -> _grad_fn rebuilt against
+#      the new coefficients; _eval_fn stays None;
+#   4. set_coeffs(..., enable_eval=True)  -> _eval_fn rebuilt against
+#      the new coefficients; _grad_fn stays None;
+#   5. set_coeffs(..., enable_grad=True, enable_eval=True) -> both
+#      rebuilt; .grad(x) matches autograd, .eval(x) matches forward.
+section("B.5  set_coeffs clears compiled fast paths; enable_grad / enable_eval rebuild them")
+u_c = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0], device=device)
+u_d = Gaussian(mean=[3.0, 3.0], variance=[1.0, 1.0], device=device)
+lc_e = Linear_Combination([u_c, u_d], [0.2, 0.8])
+lc_e.enable_grad().enable_eval()
+assert lc_e._grad_fn is not None and lc_e._eval_fn is not None, \
+    "enable_grad + enable_eval should populate both fast paths"
+
+# (1) defaults -> both fields cleared, .grad / .eval raise.
+lc_e.set_coeffs([0.7, 0.3])
+assert lc_e._grad_fn is None, "set_coeffs should clear _grad_fn by default"
+assert lc_e._eval_fn is None, "set_coeffs should clear _eval_fn by default"
+x_e = torch.randn(8, 2, device=device)
+raised_grad = False
+try:
+    lc_e.grad(x_e)
+except RuntimeError:
+    raised_grad = True
+raised_eval = False
+try:
+    lc_e.eval(x_e)
+except RuntimeError:
+    raised_eval = True
+assert raised_grad and raised_eval, \
+    "after set_coeffs() with both flags False, .grad(x) and .eval(x) should raise"
+
+# (2) enable_grad=True only -> _grad_fn rebuilt, _eval_fn stays None.
+lc_e.set_coeffs([0.4, 0.6], enable_grad=True)
+assert lc_e._grad_fn is not None, "set_coeffs(enable_grad=True) should rebuild _grad_fn"
+assert lc_e._eval_fn is None, \
+    "enable_grad=True alone must not rebuild _eval_fn"
+
+# Gradient must reflect the NEW coefficients, not the stale [0.2, 0.8].
+x_e = torch.randn(64, 2, device=device, requires_grad=True)
+fresh_46 = Linear_Combination([u_c, u_d], [0.4, 0.6])
+g_via_fast = lc_e.grad(x_e.detach()).clone()                            # compiled path
+g_via_auto = torch.autograd.grad(fresh_46(x_e).sum(), x_e)[0].detach()  # reference
+err_grad = (g_via_fast - g_via_auto).abs().max().item()
+assert err_grad < 1e-5, f"compiled grad doesn't match new mix: err = {err_grad}"
+
+# (3) enable_eval=True only -> _eval_fn rebuilt, _grad_fn dropped again.
+lc_e.set_coeffs([0.1, 0.9], enable_eval=True)
+assert lc_e._eval_fn is not None, "set_coeffs(enable_eval=True) should rebuild _eval_fn"
+assert lc_e._grad_fn is None, \
+    "enable_eval=True alone must not rebuild _grad_fn"
+fresh_19 = Linear_Combination([u_c, u_d], [0.1, 0.9])
+v_via_fast = lc_e.eval(x_e.detach())
+v_via_fwd  = fresh_19(x_e.detach())
+err_eval_only = (v_via_fast - v_via_fwd).abs().max().item()
+assert err_eval_only < 1e-5, f"rebuilt .eval(x) drifts from new mix: {err_eval_only}"
+
+# (4) both flags True -> both compiled paths populated with the new coeffs.
+lc_e.set_coeffs([0.55, 0.45], enable_grad=True, enable_eval=True)
+assert lc_e._grad_fn is not None and lc_e._eval_fn is not None, \
+    "both flags True should rebuild both fast paths"
+fresh_55 = Linear_Combination([u_c, u_d], [0.55, 0.45])
+g_both = lc_e.grad(x_e.detach()).clone()
+g_ref  = torch.autograd.grad(fresh_55(x_e).sum(), x_e)[0].detach()
+err_grad_both = (g_both - g_ref).abs().max().item()
+v_both = lc_e.eval(x_e.detach())
+v_ref  = fresh_55(x_e.detach())
+err_eval_both = (v_both - v_ref).abs().max().item()
+assert err_grad_both < 1e-5 and err_eval_both < 1e-5, \
+    f"both rebuilt; grad err = {err_grad_both}, eval err = {err_eval_both}"
+
+print(f"  defaults (both False)  -> both cleared, .grad/.eval raise:  OK")
+print(f"  enable_grad=True only  -> .grad rebuilt;  err = {err_grad:.3e}")
+print(f"  enable_eval=True only  -> .eval rebuilt;  err = {err_eval_only:.3e}")
+print(f"  both True              -> grad err = {err_grad_both:.3e}, eval err = {err_eval_both:.3e}")
+print("  [OK ] set_coeffs invalidates fast paths; flags refresh them independently")
 
 
 # ══════════════════════════════════════════════════════════════════

@@ -68,12 +68,19 @@ u = U().to(device)         # instance — full toolchain still works
 
 For a single instance in one line, use `potential_instance_from(U_fn).to(device)`. For potentials that carry state — physical constants, learnable sub-modules, etc. — subclass `Potential` directly as above.
 
-For Boltzmann-generator bridges and richer multi-rung mixtures, `Linear_Combination` composes any number of `Potential` instances into a single `U(x) = Σ_k c_k U_k(x)`, evaluated as one chained sum rather than nested compositions:
+For Boltzmann-generator bridges and richer multi-rung mixtures, `Linear_Combination` composes any number of `Potential` instances into a single `U(x) = Σ_k c_k U_k(x)`, evaluated as one chained sum rather than nested compositions. Coefficients are stored as a plain `list[float]`; the constructor also accepts a 1-d tensor or `None` (uniform 1/N default):
 
 ```python
 from zflows.potential import Linear_Combination
 
 U = Linear_Combination([U0, U1, ...], [c0, c1, ...])
+U_uniform = Linear_Combination([U0, U1, ...])           # coeffs default to [1/N] * N
+```
+
+For annealed bridges, build the `Linear_Combination` once and **retune its coefficients in place with `set_coeffs`** — no per-rung re-instantiation, no compiled-fast-path leak. Pass `enable_grad=True` / `enable_eval=True` to drop the previous rung's compiled `.grad(x)` / `.eval(x)` artifacts and rebuild them against the new mix in the same call (used to feed MALA / HMC at each rung):
+
+```python
+U.set_coeffs([c0_new, c1_new], enable_grad=True, enable_eval=True)
 ```
 
 Precompiled gradients on `Potential`: opt-in to a `torch.compile`-compiled `vmap(grad(u))` with a single chainable call.
@@ -378,7 +385,7 @@ python -m tests.3D_periodic
 <details open>
 <summary><strong>5. Annealed Boltzmann generator (4D, two repelling charges)</strong></summary>
 
-[`tests/4D_Boltzmann_generator.py`](tests/4D_Boltzmann_generator.py) (writeup: [`tests/4D_Boltzmann_generator.md`](tests/4D_Boltzmann_generator.md)) trains an `NSF` on the 4D target of two charges in $\mathbb R^2$ confined to a soft annulus and repelling via a regularized 3D Coulomb. A direct flow proposal would have $\mathrm{ESS} \approx 0$, so we anneal: build $M{=}12$ bridge potentials $U_k = (1-c_k)U_0 + c_k U_1$ via `Linear_Combination`, and at each rung run *resample → reverse KL train → IS → resample → MALA rejuvenation* with the same flow warm-started across rungs. The figure shows the marginal annulus forming (top row) and the joint relative-angle distribution $\Delta\theta = \theta_2 - \theta_1$ on $S^1$ shifting from uniform at $k=0$ to peaked at $\pm\pi$ at $k=12$ — the antipodal Coulomb minimum.
+[`tests/4D_Boltzmann_generator.py`](tests/4D_Boltzmann_generator.py) (writeup: [`tests/4D_Boltzmann_generator.md`](tests/4D_Boltzmann_generator.md)) trains an `NSF` on the 4D target of two charges in $\mathbb R^2$ confined to a soft annulus and repelling via a regularized 3D Coulomb. A direct flow proposal would have $\mathrm{ESS} \approx 0$, so we anneal: stand up two `Linear_Combination` bridge potentials *once* (the IS denominator $U_{k-1}$ and the training / IS-numerator / MALA target $U_k$) and retune their coefficients at every rung via `set_coeffs([c, 1-c], enable_grad=True, enable_eval=True)` — one Python object survives all $M{=}12$ rungs, the compiled `.grad(x)` / `.eval(x)` fast paths get rebuilt against the new mix on each retune, and a single hoisted `loss_compile(reverse_KL, U_curr, F)` handles the per-rung reverse-KL training without per-rung re-instantiation. Each rung runs *resample → reverse KL train → IS → resample → MALA rejuvenation*, with the same flow warm-started across rungs. The figure shows the marginal annulus forming (top row) and the joint relative-angle distribution $\Delta\theta = \theta_2 - \theta_1$ on $S^1$ shifting from uniform at $k=0$ to peaked at $\pm\pi$ at $k=12$ — the antipodal Coulomb minimum.
 
 ```bash
 python -m tests.4D_Boltzmann_generator

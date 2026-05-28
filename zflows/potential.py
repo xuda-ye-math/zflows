@@ -234,25 +234,11 @@ class Linear_Combination(Potential):
 
     The child potentials are stored as an `nn.ModuleList`, so
     `.to(device)`, `.parameters()`, and `.state_dict()` recurse through
-    them. Coefficients are stored on `self.coeffs` in one of two forms:
-
-      - **Python list of floats** (the simplest case). Mutate
-        `self.coeffs[k] = new_value` between iterations to retune one
-        term. Immune to `.to(device)` — `float * Tensor` lifts to the
-        tensor's device automatically.
-      - **`torch.Tensor` of shape `[N]`**. Registered as an `nn.Module`
-        buffer so `.to(device)` / `.cuda()` / `.float()` move it along
-        with the potentials — that's the redundancy that keeps a stray
-        `.to('cuda')` from leaving the coeffs on CPU and tripping a
-        device-mismatch error on the next forward. Mutate in place via
-        `self.coeffs[k] = new_value` or `self.coeffs.fill_(...)` —
-        modern PyTorch refuses any reassignment `self.coeffs = ...`
-        with a clear `TypeError`, so the buffer registration is safe.
-
-    A device-resident tensor also avoids the Dynamo Python-float
-    specialization that would otherwise re-trace the compiled graph on
-    every coefficient change — handy for annealed schedules sharing a
-    single compiled forward.
+    them. Coefficients are stored on `self.coeffs` as a plain Python
+    `list[float]` regardless of how they were passed in (list, tuple,
+    1-d Tensor, or `None`). Mutate `self.coeffs[k] = new_value` between
+    iterations to retune one term. Immune to `.to(device)` —
+    `float * Tensor` lifts to the tensor's device automatically.
 
     If you prefer plain Python callables over `Potential` objects, you can
     skip this class entirely: define `lambda x: sum(c_k * U_k(x) for ...)`
@@ -262,43 +248,95 @@ class Linear_Combination(Potential):
     def __init__(
         self,
         potentials: list["Potential"] | tuple["Potential", ...],
-        coeffs: list[float] | tuple[float, ...] | torch.Tensor,
+        coeffs: list[float] | tuple[float, ...] | torch.Tensor | None = None,
     ):
         """
         Input:
             potentials: list/tuple of N Potential instances (N >= 1)
             coeffs:     list/tuple of N floats, or a 1-d Tensor of shape
-                        [N], holding the matching coefficients.
+                        [N], holding the matching coefficients. If None
+                        (the default), defaults to a uniform 1/N on each
+                        potential, i.e. the plain average
+                        U(x) = (1/N) * sum_k U_k(x).
+                        Tensor inputs are detached and converted to a
+                        plain `list[float]` before storage.
 
-        Both inputs must be non-empty and have the same length.
+        `potentials` must be non-empty; when `coeffs` is provided
+        explicitly, its length must match.
         """
         super().__init__()
+        assert len(potentials) >= 1, "Linear_Combination needs at least one term"
+        if coeffs is None:
+            coeffs = [1.0 / len(potentials)] * len(potentials)
+        elif isinstance(coeffs, torch.Tensor):
+            assert coeffs.ndim == 1, \
+                f"Tensor coeffs must be 1-d, got shape {tuple(coeffs.shape)}"
+            coeffs = coeffs.detach().cpu().tolist()
         assert len(potentials) == len(coeffs), \
             f"potentials ({len(potentials)}) and coeffs ({len(coeffs)}) must have the same length"
-        assert len(potentials) >= 1, "Linear_Combination needs at least one term"
         self.potentials = nn.ModuleList(potentials)
+        self.coeffs = [float(c) for c in coeffs]
+
+    def set_coeffs(
+        self,
+        coeffs: list[float] | tuple[float, ...] | torch.Tensor,
+        enable_grad: bool = False,
+        enable_eval: bool = False,
+    ) -> "Linear_Combination":
+        """Replace `self.coeffs` in place with a new set of weights, and
+        invalidate any previously compiled `.grad(x)` / `.eval(x)` fast
+        paths so subsequent calls cannot return stale-coefficient values.
+
+        Useful for annealed bridges or schedule updates that keep the
+        same `Linear_Combination` instance across rungs — just retune the
+        mix and (optionally) recompile the gradient / forward fast paths.
+
+        Input:
+            coeffs: list/tuple of N floats, or a 1-d Tensor of shape [N];
+                    None is not accepted (call the constructor or assign
+                    `self.coeffs = [1.0 / N] * N` if you want uniform).
+                    Length must match the number of potentials.
+            enable_grad: if True, immediately rebuild the compiled
+                    `.grad(x)` fast path against the new coefficients
+                    (equivalent to calling `.enable_grad()` after the
+                    invalidation). If False (default), `_grad_fn` is left
+                    as None and `.grad(x)` will raise until you opt in
+                    again.
+            enable_eval: if True, immediately rebuild the compiled
+                    `.eval(x)` fast path against the new coefficients
+                    (equivalent to calling `.enable_eval()` after the
+                    invalidation). If False (default), `_eval_fn` is
+                    left as None and `.eval(x)` will raise until you opt
+                    in again.
+        Returns:
+            self, so the call can be chained.
+
+        Note: `enable_grad` / `enable_eval` are idempotent and would
+        otherwise early-return on a second call. `set_coeffs` always
+        clears `_grad_fn` and `_eval_fn` first so the rebuild actually
+        happens, and so any stale CUDA-graph buffer from the old
+        coefficients is dropped.
+        """
+        assert coeffs is not None, "set_coeffs(): coeffs must not be None"
         if isinstance(coeffs, torch.Tensor):
             assert coeffs.ndim == 1, \
                 f"Tensor coeffs must be 1-d, got shape {tuple(coeffs.shape)}"
-            # Coeffs are mixture / interpolation weights, not learnable
-            # parameters. Registering a requires_grad=True tensor as a
-            # buffer would silently hide it from `optimizer.parameters()`
-            # while still accumulating `.grad` — a confusing footgun.
-            # Reject it explicitly; users who want a trainable mixture
-            # should subclass Linear_Combination and register a real
-            # nn.Parameter themselves.
-            assert not coeffs.requires_grad, (
-                "Linear_Combination coeffs are stored as a buffer and must not "
-                "require gradients; pass `coeffs.detach()` or build the tensor "
-                "without `requires_grad=True`."
-            )
-            # Register as a buffer so .to(device) / .cuda() / .float() etc.
-            # move the coeffs in lock-step with the potentials' parameters
-            # and buffers. Without this, a tensor stored as a plain attribute
-            # would stay on its original device while the potentials move.
-            self.register_buffer("coeffs", coeffs)
-        else:
-            self.coeffs = list(coeffs)
+            coeffs = coeffs.detach().cpu().tolist()
+        assert len(coeffs) == len(self.potentials), (
+            f"set_coeffs(): expected {len(self.potentials)} coeffs to match "
+            f"the stored potentials, got {len(coeffs)}"
+        )
+        self.coeffs = [float(c) for c in coeffs]
+        # Always drop the previously compiled fast paths — they were
+        # specialised on the old coefficients and would otherwise return
+        # stale gradients / energies on the next call.
+        self._grad_fn = None
+        self._eval_fn = None
+        if enable_grad:
+            self.enable_grad()
+        if enable_eval:
+            self.enable_eval()
+        return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

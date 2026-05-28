@@ -6,6 +6,7 @@ import torch
 from zflows.potential import Potential, Gaussian, Linear_Combination
 from zflows.flow import NSF
 import zflows.loss
+from zflows.loss import reverse_KL
 from zflows.utils import (
     compute_ESS_log, resample, rejuvenation, importance_weights_log,
     set_cache_size_limit, suppress_warnings,
@@ -98,15 +99,25 @@ else:
     # per batch.
     F = flow.t()
 
-    # Annealed reverse-KL loss: U_curr(y) = (1 - c) * U_source(y) + c * U_target(y).
-    # c is baked into the captured closure of loss_compile (one fresh
-    # compile per rung); we deliberately avoid loss_compile_beta here because
-    # bridge interpolation between two different potentials is a
-    # different operation than the high->low-temp tempering loss_compile_beta
-    # is designed for.
-    def reverse_KL_annealed(x: torch.Tensor, src: Potential, tgt: Potential, F, c: float) -> torch.Tensor:
-        y, ladj = F.call_and_ladj(x)
-        return ((1.0 - c) * src(y) + c * tgt(y) - ladj).mean()
+    # Build the two bridge potentials ONCE — `U_prev` for the
+    # importance-weight denominator and `U_curr` for the IS numerator +
+    # rejuvenation target + reverse-KL training — and retune each rung
+    # via `set_coeffs`. The `Linear_Combination` instances persist
+    # across rungs, so the downstream `enable_grad` / `enable_eval` fast
+    # paths get rebuilt on the same Python object (via
+    # `set_coeffs(enable_*=True)`) instead of leaking a fresh compile
+    # artifact every step.
+    U_prev = Linear_Combination([u_target, u_source])  # uniform 1/N placeholder coeffs
+    U_curr = Linear_Combination([u_target, u_source])
+
+    # Reverse-KL on the combined potential U_curr = c_k * U_target + (1 - c_k) * U_source.
+    # `loss_compile` captures (U_curr, F) by reference. set_coeffs mutates
+    # U_curr.coeffs[k] in place each rung; Dynamo guards on those Python
+    # floats and re-specialises on first call after every change, so we
+    # get one cached spec per rung (cache_size_limit above must allow
+    # >= M specs). One closure for the whole anneal — no per-rung
+    # rebuild of the loss object.
+    loss_fn = zflows.loss.loss_compile(reverse_KL, U_curr, F)
 
     # annealed Boltzmann generator: for each k = 1, ..., M, train the flow
     # using the previous and current bridges
@@ -115,8 +126,15 @@ else:
     for k in range(1, M + 1):
         c_p = c_list[k - 1].item()
         c_k = c_list[k    ].item()
-        U_prev = Linear_Combination([u_target, u_source], [c_p, 1.0 - c_p])
-        U_curr = Linear_Combination([u_target, u_source], [c_k, 1.0 - c_k])
+        # Retune the bridge potentials in place. `U_curr` needs the
+        # compiled `.grad(x)` + `.eval(x)` fast paths for MALA
+        # rejuvenation in step (4); pass both flags so set_coeffs drops
+        # the previous rung's compiled artifacts and rebuilds them
+        # against the new mix in one call. `U_prev` is only used by
+        # `importance_weights_log` via its plain forward, so leave its
+        # fast paths off.
+        U_prev.set_coeffs([c_p, 1.0 - c_p])
+        U_curr.set_coeffs([c_k, 1.0 - c_k], enable_grad=True, enable_eval=True)
         print(f"=== step {k}/{M}   c_{k-1} = {c_list[k-1].item():.3f}  ->  c_{k} = {c_k:.3f} ===")
 
         # (1) resample N_TRAIN training samples from x_valid_prev (~ mu_{k-1})
@@ -124,11 +142,10 @@ else:
         x_train_prev = x_valid_prev[idx]
 
         # (2) train the flow: reverse KL from x_train_prev (~mu_{k-1}) to U_curr (mu_k).
-        # The U_{k-1}(x) term in the reverse-KL objective is parameter-independent,
-        # so baking c_k into the annealed loss above gives the right
-        # gradient directly. One fresh compile per rung; cache headroom
-        # is set above.
-        loss_fn = zflows.loss.loss_compile(reverse_KL_annealed, u_source, u_target, F, c_k)
+        # `loss_fn` was hoisted outside the loop and captures U_curr by
+        # reference; the set_coeffs above already retuned U_curr to this
+        # rung, so the next call sees the new coefficients (Dynamo
+        # respecialises on guard miss).
         for epoch in range(EPOCH):
             perm = torch.randperm(N_TRAIN, device=device)
             epoch_loss, n_batches = 0.0, 0
@@ -153,9 +170,8 @@ else:
             w = (log_w - log_w.max()).exp()
             y_resampled = resample(y_pf, w)
 
-        # (4) rejuvenate against U_curr to break duplicates and decorrelate
-        U_curr.enable_grad() # opt-in: compiled vmap(grad(forward)) for ULA / MALA proposal
-        U_curr.enable_eval() # opt-in: compiled forward, used by MALA accept/reject
+        # (4) rejuvenate against U_curr; compiled .grad / .eval were
+        # rebuilt against this rung's coefficients at the top of the loop.
         x_valid_curr = rejuvenation(y_resampled, potential=U_curr, adjust=True, chunk=4)
 
         # (5) only x_valid_curr is carried into the next step;
