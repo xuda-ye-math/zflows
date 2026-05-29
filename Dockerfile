@@ -18,9 +18,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# --- Python (Ubuntu 24.04 default: python3.12) ---
+# --- Python + connection/auth tools (Ubuntu 24.04 default: python3.12) ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-venv python3-dev ca-certificates && \
+        python3 python3-venv python3-dev \
+        ca-certificates curl wget git openssh-client gnupg micro && \
     rm -rf /var/lib/apt/lists/*
 
 # --- Virtual env named "torch", matching ~/.envs/torch ---
