@@ -213,6 +213,43 @@ help(NSF)
 pip uninstall zflows
 ```
 
+## Docker
+
+A prebuilt GPU image is published on Docker Hub: [`xudayemath/zflows`](https://hub.docker.com/r/xudayemath/zflows). It bundles `zflows` with PyTorch (CUDA 13 / cu130 wheels) and the usual scientific stack (numpy, scipy, scikit-learn, pandas, matplotlib, h5py, tqdm) on top of `nvidia/cuda:13.2.1-devel-ubuntu24.04`.
+
+`--gpus all` requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host.
+
+**Interactive shell** (GPU attached):
+
+```bash
+docker run --rm -it --gpus all xudayemath/zflows:cu13
+```
+
+**Mount your project** and work in it (files persist on the host):
+
+```bash
+docker run --rm -it --gpus all -v "$PWD:/workspace" xudayemath/zflows:cu13
+```
+
+**Python REPL:**
+
+```bash
+docker run --rm -it --gpus all xudayemath/zflows:cu13 python
+```
+
+**Verify compile support on the GPU:**
+
+```bash
+docker run --rm -it --gpus all xudayemath/zflows:cu13 \
+  python -c "import zflows; zflows.utils.check_compile_available()"
+```
+
+To build it yourself instead, use the [`Dockerfile`](Dockerfile) at the repo root:
+
+```bash
+docker build -t xudayemath/zflows:cu13 .
+```
+
 ## Mathematical Background
 
 <details>
