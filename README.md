@@ -44,15 +44,17 @@ Swapping flow classes is a one-line change. Every class also exposes `flow.zeros
 ```python
 from zflows.potential import Potential
 
-class MyPotential(Potential): # any user-defined energy
+class My_Potential(Potential): # any user-defined energy
     def __init__(self, ...): # any constructor args you need (physical constants, hyperparams, sub-modules, ...)
         super().__init__()
         ...
     def forward(self, x: torch.Tensor) -> torch.Tensor: # Tensor [N, d] -> Tensor [N]
         return ...
 
-u = MyPotential().to(device)   # create an instance; `u(x)` then works as the standard forward call.
+u = My_Potential().to(device)   # create an instance; `u(x)` then works as the standard forward call.
 ```
+
+Throughout the whole project the naming follows a simple rule: potential classes capitalize the first letter of each word (`My_Potential`, `Gaussian`, `Gaussian_Mixture`), while potential instances lowercase the first letter of each word (`u`, `u0`, `u_target`). So `My_Potential` is the class and `u = My_Potential()` is the instance.
 
 The `def __init__(self): super().__init__()` boilerplate is **always recommended**, even when you have no extra state to initialize — skipping it leaves `nn.Module`'s internals uncreated and the next call `u(x)` fails with a cryptic `AttributeError`.
 
@@ -61,10 +63,10 @@ If there are no constructor args and no extra state to worry about, `potential_f
 ```python
 from zflows.potential import potential_from
 
-def myforward(x: torch.Tensor) -> torch.Tensor: # Tensor [N, d] -> Tensor [N]
+def my_forward(x: torch.Tensor) -> torch.Tensor: # Tensor [N, d] -> Tensor [N]
     return ...
 
-u = potential_from(myforward).to(device)   # create an instance; `u(x)` then works as the myforward call.
+u = potential_from(my_forward).to(device)   # create an instance; `u(x)` then works as the my_forward call.
 ```
 
 For potentials that carry state — physical constants, learnable sub-modules, etc. — subclass `Potential` directly as above.
@@ -74,14 +76,14 @@ For Boltzmann-generator bridges and richer multi-rung mixtures, `linear_combinat
 ```python
 from zflows.potential import linear_combination
 
-# u0, u1, ... are Potential instances (e.g. `Gaussian(...)`, `MyPotential(...)`).
+# u0, u1, ... are Potential instances (e.g. `Gaussian(...)`, `My_Potential(...)`).
 u = linear_combination([u0, u1, ...], [c0, c1, ...])
 ```
 
 **Auto-compiled gradient feature.** Opt-in to a `torch.compile`-compiled `vmap(grad(u))` with a single chainable call on any `Potential` instance:
 
 ```python
-u = MyPotential().to(device).enable_grad()
+u = My_Potential().to(device).enable_grad()
 g = u.grad(x) # x: [N, d] -> g: [N, d], no requires_grad_ on x needed
 ```
 
@@ -91,7 +93,7 @@ The gradient closure is built once, cached on the instance, and reused every cal
 
 ```python
 u0 = Gaussian(...).enable_grad()       # instance, not class
-u1 = MyPotential(...).enable_grad()    # instance, not class
+u1 = My_Potential(...).enable_grad()    # instance, not class
 
 u = linear_combination([u0, u1], [0.2, 0.8])   # instance; u.grad(x) works immediately
 ```
