@@ -21,10 +21,11 @@ into one banner-separated harness. Sections:
       inverse-temperature beta scaling, reduced discretization bias vs
       Euler-Maruyama (ULA) at matched step, enable_grad gating,
       chunk-equivalence.
-   F. Annealed importance sampling (flow-proposal SMC): a trained NSF maps
-      source -> target, AIS lands the pushforward cloud tightly on the target
-      (mean/std), the ladder beats a single hop on a poor proposal, target
-      enable_grad gating (source needs none), chunk-equivalence.
+   F. Annealed importance sampling (flow-proposal SMC), _F and _G variants:
+      a trained NSF maps source -> target, AIS lands the pushforward cloud
+      tightly on the target (mean/std), the ladder beats a single hop on a poor
+      proposal, target enable_grad gating (source needs none), chunk-equivalence,
+      and the inverse-map _G twin (G = F.inv) reproduces the _F weight rule.
 """
 
 import math
@@ -36,7 +37,8 @@ from zflows.flow import NSF
 from zflows.loss import reverse_KL
 from zflows.utils import (
     hmc, langevin, stochastic_heun, lbfgs, optimization,
-    importance_weights, importance_weights_log, annealed_importance_sampling,
+    importance_weights, importance_weights_log,
+    annealed_importance_sampling_F, annealed_importance_sampling_G,
     compute_ESS_log, set_cache_size_limit, suppress_warnings,
 )
 
@@ -589,10 +591,12 @@ print("  [OK ] chunk produces statistically equivalent samples")
 # ══════════════════════════════════════════════════════════════════
 # F. Annealed importance sampling (flow-proposal SMC)
 # ══════════════════════════════════════════════════════════════════
-banner("F. annealed_importance_sampling: flow proposal F_# source -> target")
-# AIS now takes a trained flow F as the proposal and anneals along the
-# geometric path between F_# source and the target, refreshing x = F^{-1}(y)
-# for the importance weights and rejuvenating with Langevin in the target.
+banner("F. annealed_importance_sampling_F / _G: flow proposal F_# source -> target")
+# AIS takes a trained flow as the proposal and anneals along the geometric
+# path between F_# source and the target, refreshing the latent pre-image for
+# the importance weights and rejuvenating with Langevin in the target. The _F
+# variant takes the forward map F (source -> target); the _G variant takes the
+# inverse map G = F^{-1} (target -> source) and is otherwise identical.
 # source = N(0, I), target = N([3, 3], 0.5 I); an NSF is reverse-KL trained so
 # that F_# source ~~ target, then AIS should land the cloud on the target.
 ais_source = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device)        # forward-only, no enable_grad
@@ -619,7 +623,7 @@ print(f"  trained proposal ESS (F_# source vs target) = {ess_prop:.3f}")
 section("F.1  AIS lands the pushforward cloud on the target N([3, 3], 0.5 I)")
 torch.manual_seed(61)
 x_src = ais_source.samples(8000)
-y = annealed_importance_sampling(
+y = annealed_importance_sampling_F(
     x_src, source=ais_source, target=ais_target, F=ais_F,
     ladder=12, step=3e-3, iters=30, chunk=2,
 )
@@ -644,9 +648,9 @@ bad_flow = NSF(a=[-6.0, -6.0], b=[6.0, 6.0], bins=8, transforms=4,
 bad_flow.zeros()                 # identity init: F_# source = source, far from target
 bad_F = bad_flow.t()
 x_src = ais_source.samples(6000)
-y_one = annealed_importance_sampling(x_src, ais_source, ais_target, bad_F,
+y_one = annealed_importance_sampling_F(x_src, ais_source, ais_target, bad_F,
                                      ladder=1,  step=2e-3, iters=60, chunk=2)
-y_lad = annealed_importance_sampling(x_src, ais_source, ais_target, bad_F,
+y_lad = annealed_importance_sampling_F(x_src, ais_source, ais_target, bad_F,
                                      ladder=20, step=2e-3, iters=60, chunk=2)
 err_one = max(abs(v - 3.0) for v in y_one.mean(0).tolist())
 err_lad = max(abs(v - 3.0) for v in y_lad.mean(0).tolist())
@@ -662,13 +666,13 @@ tgt_raw = Gaussian(mean=[3.0, 3.0], variance=[0.5, 0.5]).to(device)
 x0 = ais_source.samples(64)
 raised_tgt = False
 try:
-    annealed_importance_sampling(x0, ais_source, tgt_raw, ais_F, ladder=4)
+    annealed_importance_sampling_F(x0, ais_source, tgt_raw, ais_F, ladder=4)
 except RuntimeError as e:
     raised_tgt = True
     print(f"  target not enabled -> raised: {e}")
 assert raised_tgt, "must raise when target lacks enable_grad()"
 # source without enable_grad must be fine (only ever called forward)
-y_ok = annealed_importance_sampling(x0, ais_source, ais_target, ais_F, ladder=2, iters=10)
+y_ok = annealed_importance_sampling_F(x0, ais_source, ais_target, ais_F, ladder=2, iters=10)
 assert torch.isfinite(y_ok).all(), "source needs no enable_grad; run must succeed"
 print("  [OK ] target gated on enable_grad(); raw source accepted")
 
@@ -677,10 +681,10 @@ section("F.4  chunk statistically matches chunk=1 (aggregate moments)")
 torch.manual_seed(7)
 x_src = ais_source.samples(6000)
 torch.manual_seed(70)
-y1 = annealed_importance_sampling(x_src, ais_source, ais_target, ais_F,
+y1 = annealed_importance_sampling_F(x_src, ais_source, ais_target, ais_F,
                                   ladder=10, step=3e-3, iters=40, chunk=1)
 torch.manual_seed(70)
-y4 = annealed_importance_sampling(x_src, ais_source, ais_target, ais_F,
+y4 = annealed_importance_sampling_F(x_src, ais_source, ais_target, ais_F,
                                   ladder=10, step=3e-3, iters=40, chunk=4)
 mean_err = (y1.mean(0) - y4.mean(0)).abs().max().item()
 std_err  = (y1.std(0)  - y4.std(0) ).abs().max().item()
@@ -691,6 +695,39 @@ print(f"  max |std (chunk=1) - std (chunk=4)| = {std_err:.4f}")
 assert mean_err < 0.05, f"chunk moments diverged: mean err {mean_err}"
 assert std_err  < 0.05, f"chunk moments diverged: std err {std_err}"
 print("  [OK ] chunk produces statistically equivalent samples")
+
+# F.5 — the _G variant (inverse map G = F.inv) is the exact twin of _F:
+#        same per-rung weight rule, so it lands on the same target.
+section("F.5  _G (inverse map G = F.inv) matches _F")
+ais_G = ais_F.inv # G = F^{-1}: G.inv(x) = F(x), G(y) = F^{-1}(y)
+# (a) the incremental weight rule agrees with _F's to round-trip tolerance:
+#     _F uses +log|det J_F(x)| (forward at x = F.inv(y)); _G uses -log|det J_G(y)|
+#     (inverse at y); these are equal up to the bijection's round-trip error.
+torch.manual_seed(75)
+y_probe = ais_target.samples(4000)
+with torch.no_grad():
+    xF = ais_F.inv(y_probe); _, ladjF = ais_F.call_and_ladj(xF)
+    wF = -ais_target(y_probe) + ais_source(xF) + ladjF
+    xG, ladjG = ais_G.call_and_ladj(y_probe)
+    wG = -ais_target(y_probe) + ais_source(xG) - ladjG
+w_err = (wF - wG).abs().max().item()
+print(f"  max |log w_F - log w_G| = {w_err:.2e}  (round-trip tolerance)")
+assert w_err < 1e-3, f"_F / _G weight rule diverged: {w_err}"
+# (b) _G lands the cloud on the target, just like _F.1.
+torch.manual_seed(61)
+x_src = ais_source.samples(8000)
+yG = annealed_importance_sampling_G(x_src, ais_source, ais_target, ais_G,
+                                    ladder=12, step=3e-3, iters=30, chunk=2)
+meanG = yG.mean(0).tolist()
+stdG = yG.std(0).tolist()
+print(f"   _G mean = {[f'{v:+.3f}' for v in meanG]}  (target [3.000, 3.000])")
+print(f"   _G std  = {[f'{v:.3f}' for v in stdG]}  (target [{target_std:.3f}, {target_std:.3f}])")
+assert torch.isfinite(yG).all(), "_G leaked non-finite particles"
+for v in meanG:
+    assert abs(v - 3.0) < 0.1, f"_G mean off target: {meanG}"
+for v in stdG:
+    assert abs(v - target_std) < 0.1, f"_G std off target: {stdG}"
+print("  [OK ] _G reproduces the weight rule and lands on the target")
 
 
 # ─────────────────────────────────────────────────────────────────

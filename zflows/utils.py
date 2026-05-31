@@ -473,13 +473,19 @@ def langevin(samples: torch.Tensor, potential: Potential, beta: float = 1.0, ste
         out.append(x)
     return torch.cat(out, dim=0)
 
-def annealed_importance_sampling(samples: torch.Tensor, source: Potential, target: Potential, F: ComposedTransform, beta_source: float = 1.0, beta_target: float = 1.0, ladder: int = 1, step: float = 1e-3, iters: int = 100, chunk: int = 1) -> torch.Tensor:
+def annealed_importance_sampling_F(samples: torch.Tensor, source: Potential, target: Potential, F: ComposedTransform, beta_source: float = 1.0, beta_target: float = 1.0, ladder: int = 1, step: float = 1e-3, iters: int = 100, chunk: int = 1) -> torch.Tensor:
     """
     Annealed importance sampling (an SMC sampler) that uses a trained flow `F`
     as the proposal. The source `mu_0 ~ exp(-beta_source * source)` and target
     `mu_1 ~ exp(-beta_target * target)` live in the same space, and `F` has been
     trained so that the pushforward `F_# mu_0 ~~ mu_1`. The input `samples` are
     drawn from `mu_0`; the routine returns samples from `mu_1`.
+
+    `F` is the **forward** map (source -> target); `F(x)` pushes a source sample
+    forward and `F.inv(y)` recovers its latent pre-image. The twin
+    `annealed_importance_sampling_G` is identical but takes the **inverse** map
+    `G = F^{-1}` (target -> source) instead, swapping `F(x) <-> G.inv(x)` and
+    `F.inv(y) <-> G(y)` (same convention as `source_KL_F` / `source_KL_G`).
 
     Annealing follows the geometric path between the flow proposal and the
     target,
@@ -545,7 +551,7 @@ def annealed_importance_sampling(samples: torch.Tensor, source: Potential, targe
     """
     if target._grad_fn is None:
         raise RuntimeError(
-            f"annealed_importance_sampling() rejuvenates with Langevin on the "
+            f"annealed_importance_sampling_F() rejuvenates with Langevin on the "
             f"target, which needs gradients; call "
             f"{type(target).__name__}.enable_grad() before passing it in."
         )
@@ -565,6 +571,94 @@ def annealed_importance_sampling(samples: torch.Tensor, source: Potential, targe
                 xc = F.inv(yc) # x = F^{-1}(y)
                 _, ladj = F.call_and_ladj(xc) # ladj = log|det J_F(x)|
                 parts.append((-beta_target * target(yc) + beta_source * source(xc) + ladj) / M)
+            log_w = torch.cat(parts, dim=0)
+            w = (log_w - log_w.max()).exp() # self-normalised, in [0, 1]
+        # (2) resample onto high-weight particles, then rejuvenate in mu_1.
+        y = resample(y, w)
+        y = langevin(y, target, beta=beta_target, step=step, iters=iters, chunk=chunk)
+    return y
+
+def annealed_importance_sampling_G(samples: torch.Tensor, source: Potential, target: Potential, G: ComposedTransform, beta_source: float = 1.0, beta_target: float = 1.0, ladder: int = 1, step: float = 1e-3, iters: int = 100, chunk: int = 1) -> torch.Tensor:
+    """
+    Inverse-map twin of `annealed_importance_sampling_F`: identical flow-proposal
+    SMC, but the flow is supplied as the **inverse** map `G = F^{-1}` (target ->
+    source) rather than the forward `F` (source -> target). The proposal is still
+    `F_# mu_0 = (G^{-1})_# mu_0`, where `mu_0 ~ exp(-beta_source * source)` and
+    `mu_1 ~ exp(-beta_target * target)`. Input `samples` are drawn from `mu_0`;
+    the routine returns samples from `mu_1`.
+
+    The only difference from the `_F` variant is which direction of the flow each
+    call uses (same convention as `source_KL_F` / `source_KL_G`):
+        F(x)      <-> G.inv(x)      (push a source sample forward to mu_1)
+        F^{-1}(y) <-> G(y)          (recover a target sample's latent pre-image)
+    and the Jacobian read off `G` is the inverse one,
+        log|det J_G(y)| = -log|det J_F(x)|,   x = G(y),
+    so the same proposal -> target importance weight
+        log w(y) = -beta_target * target(y) + beta_source * source(x)
+                   + log|det J_F(x)|
+                 = -beta_target * target(y) + beta_source * source(x)
+                   - log|det J_G(y)|
+    appears with a flipped Jacobian sign.
+
+    Steps:
+      (0) y <- G^{-1}(samples)                 # push source samples to pi_0 = F_# mu_0
+      (1) for k = 1, ..., M:
+            x      <- G(y)                       # latent pre-image (x = F^{-1}(y))
+            log w  <- (1 / M) * (-beta_target * target(y)
+                                 + beta_source * source(x)
+                                 - log|det J_G(y)|)
+            y      <- resample(y, self-normalised w)
+            y      <- langevin(y, target, beta=beta_target, ...)   # rejuvenate in mu_1
+
+    As in the `_F` variant, no bridge potential is built, rejuvenation targets
+    `mu_1` directly (not the exact intermediate `pi_k`), and only
+    `target.enable_grad()` is required (`source` is forward-only). `G` must
+    support `G.inv` (the forward push) and `G.call_and_ladj` (the latent refresh
+    + inverse Jacobian).
+
+    Input:
+        samples:     Tensor [N, d]      particles drawn from mu_0 (source space)
+        source:      Potential          source potential U_0 = -log mu_0
+        target:      Potential          target potential U_1 = -log mu_1
+                                        (must be enable_grad()'d)
+        G:           ComposedTransform  trained inverse flow map target -> source
+                                        (G = F^{-1}, e.g. flow.t()); must support
+                                        .inv and .call_and_ladj
+        beta_source: float              inverse temperature of the source (default 1.0)
+        beta_target: float              inverse temperature of the target (default
+                                        1.0); also the Langevin rejuvenation temperature
+        ladder:      int                number of annealing rungs M (>= 1)
+        step:        float              Langevin (ULA) step size, shared across rungs
+        iters:       int                Langevin steps per rung
+        chunk:       int                split along dim 0 into this many chunks for
+                                        the pushforward / inverse / weight passes and
+                                        inside each Langevin call, to bound peak VRAM
+                                        (statistically equivalent to chunk=1).
+    Output:
+        samples:     Tensor [N, d]      particles in mu_1 (target space),
+                                        approximating exp(-beta_target * target).
+    """
+    if target._grad_fn is None:
+        raise RuntimeError(
+            f"annealed_importance_sampling_G() rejuvenates with Langevin on the "
+            f"target, which needs gradients; call "
+            f"{type(target).__name__}.enable_grad() before passing it in."
+        )
+    M = ladder
+    # (0) push the source samples forward through F = G^{-1} to obtain pi_0 = F_# mu_0.
+    with torch.no_grad():
+        y = torch.cat([G.inv.call_and_ladj(xc)[0] for xc in torch.chunk(samples, chunk, dim=0)], dim=0)
+    for _ in range(M):
+        # (1) incremental weights w(y) ** (1 / M). For each particle y, refresh
+        #     its latent pre-image x = G(y) (= F^{-1}(y)) and reuse the
+        #     importance_weights_log rule
+        #         log w = -beta_target * target(y) + beta_source * source(x) - ladj(y),
+        #     where ladj(y) = log|det J_G(y)| = -log|det J_F(x)|; scale by 1/M.
+        with torch.no_grad():
+            parts = []
+            for yc in torch.chunk(y, chunk, dim=0):
+                xc, ladj = G.call_and_ladj(yc) # x = G(y) = F^{-1}(y), ladj = log|det J_G(y)|
+                parts.append((-beta_target * target(yc) + beta_source * source(xc) - ladj) / M)
             log_w = torch.cat(parts, dim=0)
             w = (log_w - log_w.max()).exp() # self-normalised, in [0, 1]
         # (2) resample onto high-weight particles, then rejuvenate in mu_1.
