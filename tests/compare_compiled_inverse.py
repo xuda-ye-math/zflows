@@ -1,17 +1,17 @@
 # pyright: reportOperatorIssue=false, reportArgumentType=false, reportCallIssue=false
 
-"""Benchmark the compiled forward / inverse fast paths (`flow.for_ladj` /
-`flow.inv_ladj`) against the raw `flow.t().call_and_ladj(x)` /
-`flow.t().inv.call_and_ladj(y)` pattern across an NSF (d × hidden_features) grid.
+"""Benchmark the compiled `ComposedTransform` fast paths (`F.for_ladj` /
+`F.inv_ladj`, where `F = flow.t()`) against the raw `flow.t().call_and_ladj(x)`
+/ `flow.t().inv.call_and_ladj(y)` pattern across an NSF (d × hidden_features) grid.
 
 What is measured (pure map wall-clock, under torch.no_grad, no autograd) — each
 map returns the fused `(points, log|det J|)`:
-    forward + ladj:   flow.t().call_and_ladj(x)       vs   flow.for_ladj(x)
-    inverse + ladj:   flow.t().inv.call_and_ladj(y)   vs   flow.inv_ladj(y)
+    forward + ladj:   flow.t().call_and_ladj(x)       vs   F.for_ladj(x)
+    inverse + ladj:   flow.t().inv.call_and_ladj(y)   vs   F.inv_ladj(y)
 in three modes each:
     raw                       — fresh flow.t() per call, no compile
-    compiled-default          — flow.enable_for_ladj/​enable_inv_ladj(mode='default')
-    compiled-reduce-overhead  — flow.enable_for_ladj/​enable_inv_ladj(mode='reduce-overhead')
+    compiled-default          — F.enable_for_ladj/​enable_inv_ladj(mode='default')
+    compiled-reduce-overhead  — F.enable_for_ladj/​enable_inv_ladj(mode='reduce-overhead')
 
 The compiled paths capture `F = flow.t()` once and `torch.compile` it, so they
 also save the per-call `flow.t()` reconstruction (and the eager per-op dispatch)
@@ -98,9 +98,10 @@ def build_map_fns(
     """
     if mode == "raw":
         return (lambda: flow.t().call_and_ladj(x), lambda: flow.t().inv.call_and_ladj(y))
-    flow.enable_for_ladj(mode=mode)
-    flow.enable_inv_ladj(mode=mode)
-    return (lambda: flow.for_ladj(x), lambda: flow.inv_ladj(y))
+    F = flow.t()  # capture once, enable the ComposedTransform fast paths on it
+    F.enable_for_ladj(mode=mode)
+    F.enable_inv_ladj(mode=mode)
+    return (lambda: F.for_ladj(x), lambda: F.inv_ladj(y))
 
 
 def time_map(fn: Callable[[], torch.Tensor], n_warmup: int, n_timed: int) -> float:
@@ -125,21 +126,21 @@ def sanity_check_compiled_matches_raw(
     atol: float = 1e-3,
 ) -> None:
     """Assert for_ladj/inv_ladj (both compile modes) match
-    flow.t().call_and_ladj(x) / flow.t().inv.call_and_ladj(y), points + ladj."""
+    call_and_ladj(x) / inv.call_and_ladj(y), points + ladj."""
     f = make_flow(d, hf, x.device.type)
     with torch.no_grad():
         y_raw, lj_raw = f.t().call_and_ladj(x)
         x_raw, ilj_raw = f.t().inv.call_and_ladj(y)
         for mode in ("default", "reduce-overhead"):
-            g = make_flow(d, hf, x.device.type)
-            g.enable_for_ladj(mode=mode); g.enable_inv_ladj(mode=mode)
-            yc, ljc = g.for_ladj(x)
+            G = make_flow(d, hf, x.device.type).t()
+            G.enable_for_ladj(mode=mode); G.enable_inv_ladj(mode=mode)
+            yc, ljc = G.for_ladj(x)
             if not (torch.allclose(yc, y_raw, atol=atol) and torch.allclose(ljc, lj_raw, atol=atol)):
                 sys.exit(f"FAIL — for_ladj drift at (d={d}, hf={hf}, mode={mode})")
-            xc, iljc = g.inv_ladj(y)
+            xc, iljc = G.inv_ladj(y)
             if not (torch.allclose(xc, x_raw, atol=atol) and torch.allclose(iljc, ilj_raw, atol=atol)):
                 sys.exit(f"FAIL — inv_ladj drift at (d={d}, hf={hf}, mode={mode})")
-            del g
+            del G
     del f
     gc.collect()
     torch.cuda.empty_cache()
@@ -228,8 +229,8 @@ def main() -> None:
     print()
     print("=" * 124)
     print("Per-call map latency (mean over", TIMED_STEPS, "calls, no_grad).  "
-          "fwd = flow.t().call_and_ladj(x) vs flow.for_ladj(x);  "
-          "inv = flow.t().inv.call_and_ladj(y) vs flow.inv_ladj(y).  ↑ = raw / compiled (×).")
+          "fwd = flow.t().call_and_ladj(x) vs F.for_ladj(x);  "
+          "inv = flow.t().inv.call_and_ladj(y) vs F.inv_ladj(y)  (F = flow.t()).  ↑ = raw / compiled (×).")
     print("=" * 124)
     header = (
         f"{'d':>3} | {'hidden_feat':<11} | "

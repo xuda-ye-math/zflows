@@ -37,7 +37,8 @@ from zflows.flow import NSF
 from zflows.loss import reverse_KL
 from zflows.utils import (
     hmc, langevin, stochastic_heun, lbfgs, optimization,
-    importance_weights, importance_weights_log,
+    importance_weights, importance_weights_F, importance_weights_G,
+    importance_weights_log, importance_weights_log_F, importance_weights_log_G,
     annealed_importance_sampling_F, annealed_importance_sampling_G,
     compute_ESS_log, set_cache_size_limit, suppress_warnings,
 )
@@ -451,7 +452,7 @@ print("  [OK ] alias confirmed")
 # ══════════════════════════════════════════════════════════════════
 # D. Importance-weight reweighting
 # ══════════════════════════════════════════════════════════════════
-banner("D. importance_weights / _log: defaults + beta linearity")
+banner("D. importance_weights / _log: defaults + beta linearity + F/G variants")
 
 torch.manual_seed(0)
 d = 3
@@ -498,6 +499,39 @@ err_fwd = (w_actual - w_expected).abs().max().item()
 print(f"  max |w_actual - w_expected| = {err_fwd:.3e}")
 assert err_fwd < 1e-6, f"linear wrapper drops the betas: {err_fwd}"
 print("  [OK ] kwargs reach the log-space implementation")
+
+# D.4 — F/G variants + aliases: importance_weights_log{,_F} and importance_weights{,_F}
+#        are the same symbol; the _G inverse-map twin (G = F.inv) agrees with _F.
+section("D.4  _F / _G variants and aliases")
+assert importance_weights_log is importance_weights_log_F, "importance_weights_log must alias _F"
+assert importance_weights is importance_weights_F, "importance_weights must alias _F"
+G_iw = F.inv  # inverse map target -> source
+lwF = importance_weights_log_F(x_iw, src, tgt, F,    beta_source=1.3, beta_target=0.6)
+lwG = importance_weights_log_G(x_iw, src, tgt, G_iw, beta_source=1.3, beta_target=0.6)
+err_fg = (lwF - lwG).abs().max().item()
+print(f"  aliases: log->_F={importance_weights_log is importance_weights_log_F}, "
+      f"lin->_F={importance_weights is importance_weights_F}")
+print(f"  max |log w_F - log w_G|  (G = F.inv) = {err_fg:.3e}")
+assert err_fg < 1e-3, f"_F / _G log-weights diverged: {err_fg}"
+# linear _G twin agrees with _F too
+wF = importance_weights_F(x_iw, src, tgt, F,    beta_source=1.3, beta_target=0.6)
+wG = importance_weights_G(x_iw, src, tgt, G_iw, beta_source=1.3, beta_target=0.6)
+assert (wG.max() <= 1.0 + 1e-6) and ((wF - wG).abs().max().item() < 1e-3), "linear _G twin disagrees"
+print("  [OK ] _G twin reproduces _F; aliases point to the forward variant")
+
+# D.5 — compiled fused maps (for_ladj / inv_ladj) match the raw transform path
+section("D.5  compiled for_ladj / inv_ladj match the raw path")
+F_c = flow_iw.t().enable_for_ladj(mode="default")        # forward map, compiled call_and_ladj
+G_c = flow_iw.t().inv.enable_inv_ladj(mode="default")    # inverse map, compiled inv.call_and_ladj
+lwF_c = importance_weights_log_F(x_iw, src, tgt, F_c, beta_source=1.3, beta_target=0.6)
+lwG_c = importance_weights_log_G(x_iw, src, tgt, G_c, beta_source=1.3, beta_target=0.6)
+err_Fc = (lwF_c - lwF).abs().max().item()
+err_Gc = (lwG_c - lwG).abs().max().item()
+print(f"  max |_F compiled - raw| = {err_Fc:.3e}")
+print(f"  max |_G compiled - raw| = {err_Gc:.3e}")
+assert err_Fc < 1e-3, f"_F compiled path drifted: {err_Fc}"
+assert err_Gc < 1e-3, f"_G compiled path drifted: {err_Gc}"
+print("  [OK ] compiled fused maps reproduce the raw importance weights")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -728,6 +762,26 @@ for v in meanG:
 for v in stdG:
     assert abs(v - target_std) < 0.1, f"_G std off target: {stdG}"
 print("  [OK ] _G reproduces the weight rule and lands on the target")
+
+# F.6 — compiled `.eval` energy fast path: enabling target/source.enable_eval()
+#        routes the per-rung reweighting through the compiled forward, and the
+#        run still lands on the target (same as the plain-__call__ path).
+section("F.6  AIS uses target/source.enable_eval() and still lands on target")
+src_eval = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device).enable_eval()
+tgt_eval = Gaussian(mean=[3.0, 3.0], variance=[0.5, 0.5]).to(device).enable_grad().enable_eval()
+assert tgt_eval._eval_fn is not None and src_eval._eval_fn is not None, "enable_eval did not set _eval_fn"
+torch.manual_seed(63)
+x_src = ais_source.samples(6000)
+y_ev = annealed_importance_sampling_F(x_src, src_eval, tgt_eval, ais_F,
+                                      ladder=10, step=3e-3, iters=30, chunk=2)
+mean_ev, std_ev = y_ev.mean(0).tolist(), y_ev.std(0).tolist()
+print(f"   mean = {[f'{v:+.3f}' for v in mean_ev]}  std = {[f'{v:.3f}' for v in std_ev]}  (target [3,3]/{target_std:.3f})")
+assert torch.isfinite(y_ev).all(), "AIS .eval path leaked non-finite particles"
+for v in mean_ev:
+    assert abs(v - 3.0) < 0.1, f".eval path mean off target: {mean_ev}"
+for v in std_ev:
+    assert abs(v - target_std) < 0.1, f".eval path std off target: {std_ev}"
+print("  [OK ] compiled .eval reweighting path lands on the target")
 
 
 # ─────────────────────────────────────────────────────────────────

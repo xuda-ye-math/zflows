@@ -11,7 +11,7 @@ from .potential import Potential
 # KL loss estimators — Monte Carlo KL divergences on source / target
 # ──────────────────────────────────────────────────────────────────────
 
-def source_KL_F(x: torch.Tensor, target: Potential, F: ComposedTransform, beta: float = 1.0):
+def reverse_KL_F(x: torch.Tensor, target: Potential, F: ComposedTransform, beta: float = 1.0):
     """
     KL loss using source samples to train F (the source -> target map).
     Estimates  E_{x ~ source}[ beta * target(F(x)) - log|det J_F(x)| ],
@@ -28,9 +28,9 @@ def source_KL_F(x: torch.Tensor, target: Potential, F: ComposedTransform, beta: 
     return (beta * target(y) - ladj).mean()
 
 # alias: reverse KL divergence for energy-based normalizing flow
-reverse_KL = source_KL_F
+reverse_KL = reverse_KL_F
 
-def source_KL_G(x: torch.Tensor, target: Potential, G: ComposedTransform, beta: float = 1.0):
+def reverse_KL_G(x: torch.Tensor, target: Potential, G: ComposedTransform, beta: float = 1.0):
     """
     KL loss using source samples to train G (the target -> source map).
     Estimates  E_{x ~ source}[ beta * target(G^-1(x)) - log|det J_{G^-1}(x)| ],
@@ -46,7 +46,7 @@ def source_KL_G(x: torch.Tensor, target: Potential, G: ComposedTransform, beta: 
     y, ladj = G.inv.call_and_ladj(x) # y = G^-1(x), ladj = log|det J_{G^-1}(x)|
     return (beta * target(y) - ladj).mean()
 
-def target_KL_F(y: torch.Tensor, source: Potential, F: ComposedTransform, beta: float = 1.0):
+def forward_KL_F(y: torch.Tensor, source: Potential, F: ComposedTransform, beta: float = 1.0):
     """
     KL loss using target samples to train F (the source -> target map).
     Estimates  E_{y ~ target}[ beta * source(F^-1(y)) - log|det J_{F^-1}(y)| ],
@@ -63,9 +63,9 @@ def target_KL_F(y: torch.Tensor, source: Potential, F: ComposedTransform, beta: 
     return (beta * source(x) - ladj).mean()
 
 # alias: forward KL divergence for data-driven normalizing flow
-forward_KL = target_KL_F
+forward_KL = forward_KL_F
 
-def target_KL_G(y: torch.Tensor, source: Potential, G: ComposedTransform, beta: float = 1.0):
+def forward_KL_G(y: torch.Tensor, source: Potential, G: ComposedTransform, beta: float = 1.0):
     """
     KL loss using target samples to train G (the target -> source map).
     Estimates  E_{y ~ target}[ beta * source(G(y)) - log|det J_G(y)| ],

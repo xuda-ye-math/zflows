@@ -138,39 +138,6 @@ class Potential(nn.Module):
             )
         return self._eval_fn(x)
 
-    def release(self) -> None:
-        """
-        Drop this instance's compiled .grad / .eval closures, submodules,
-        parameters, and buffers, then return cached GPU blocks to the CUDA
-        driver via torch.cuda.empty_cache().
-
-        This is *redundant* in normal use: when a Potential goes out of scope
-        Python's refcount + garbage collector reclaim its memory automatically.
-        Use .release() ONLY when out-of-memory (OOM) becomes a concrete
-        problem, e.g. swapping many large Potentials in a long-running
-        process where you've confirmed via nvidia-smi that VRAM is not being
-        returned fast enough.
-
-        Scope:
-          - Instance-scoped: only this Potential's state is cleared. Child
-            Potentials referenced elsewhere (e.g. the U0 / U1 of a
-            Linear_Combination still bound to local variables) survive and
-            keep their own ._grad_fn / ._eval_fn.
-          - Process-global side effect: torch.cuda.empty_cache() flushes
-            free blocks across all CUDA devices for the whole process. It
-            does not invalidate any other instance's compiled artifacts; the
-            global Inductor / torch.compile kernel cache is left intact.
-        """
-        import gc
-        self._grad_fn = None
-        self._eval_fn = None
-        self._modules.clear()
-        self._parameters.clear()
-        self._buffers.clear()
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
 
 # ──────────────────────────────────────────────────────────────────────
 # Functional wrappers — turn a plain callable into a Potential subclass

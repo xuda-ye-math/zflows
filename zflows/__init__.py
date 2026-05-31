@@ -8,8 +8,9 @@ Public surface:
     zflows.flow      : Flow, NSF, NCSF, CNF, OTFlow, RealNVP, ComposedTransform
     zflows.loss      : reverse_KL, forward_KL, OT_loss, loss_compile, loss_compile_beta
     zflows.utils     : compute_ESS, compute_ESS_log, compute_CESS, compute_CESS_log,
-                       importance_weights, importance_weights_log,
+                       importance_weights{,_F,_G}, importance_weights_log{,_F,_G},
                        resample, langevin, rejuvenation, stochastic_heun, hmc, lbfgs, optimization,
+                       annealed_importance_sampling{,_F,_G},
                        check_compile_available, set_cache_size_limit, suppress_warnings
 
 `ComposedTransform` lives in `zflows.core.transforms` and is re-exported

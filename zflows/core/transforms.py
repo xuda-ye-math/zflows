@@ -77,7 +77,17 @@ class ComposedTransform(Transform):
 
     Equivalent to torch.distributions.transforms.ComposeTransform plus
     zuko's optimised log-det accumulator.
+
+    Optional compiled fast paths (opt-in, mirror Potential.enable_grad):
+    `enable_for_ladj()` / `enable_inv_ladj()` torch.compile this transform's
+    fused `(points, log|det J|)` forward / inverse, then `for_ladj(x)` /
+    `inv_ladj(x)` run the compiled versions of `call_and_ladj(x)` /
+    `inv.call_and_ladj(x)`. See those methods for the (non-idempotent) refresh
+    semantics and `tests/compare_compiled_inverse.md` for the speedups.
     """
+
+    _for_ladj_fn = None # populated by enable_for_ladj()
+    _inv_ladj_fn = None # populated by enable_inv_ladj()
 
     def __init__(self, *transforms: Transform, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -159,6 +169,80 @@ class ComposedTransform(Transform):
         for t in reversed(self.transforms):
             shape = t.inverse_shape(shape)
         return shape
+
+    # ──────────────────────────────────────────────────────────────────
+    # Optional compiled fused (points, log|det J|) fast paths
+    # ──────────────────────────────────────────────────────────────────
+
+    def enable_for_ladj(self, mode: str = "reduce-overhead") -> ComposedTransform:
+        """Compile a fast ``.for_ladj(x) == self.call_and_ladj(x)`` path.
+
+        Opt-in torch.compile fast path (mirrors Potential.enable_grad)
+        returning the fused forward image and its log|det J|, i.e. (y, ladj).
+        Returns self so the call can be chained:
+            F = flow.t().enable_for_ladj()
+            y, ladj = F.for_ladj(x)
+
+        In-place parameter updates (`optimizer.step()`, `load_state_dict()`,
+        `zeros()`) are reflected automatically — this transform re-reads the
+        flow's parameter tensors on every call. **Not idempotent**: each call
+        recompiles against the current transform, so after the parameters are
+        *reallocated* (a `.to(device)` / dtype move, swapped submodule, or
+        rebuilt flow) fetch a fresh `flow.t()` and enable on that (or re-call
+        this — each call pays the torch.compile cost).
+
+        Argument:
+            mode: passed to torch.compile. 'reduce-overhead' (default) captures
+                a CUDA graph on first call; 'default' for varying batch shape /
+                tight VRAM; 'max-autotune' for extra kernel tuning.
+        """
+        self._for_ladj_fn = torch.compile(lambda x: self.call_and_ladj(x), mode=mode)
+        return self
+
+    def for_ladj(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        """Compiled forward + Jacobian: returns ``self.call_and_ladj(x)``.
+
+        Input:
+            x: Tensor [N, d]   points in the domain
+        Output:
+            y:    Tensor [N, d]   images in the codomain
+            ladj: Tensor [N]      log|det J(x)|
+        Raises RuntimeError if .enable_for_ladj() has not been called.
+        """
+        if self._for_ladj_fn is None:
+            raise RuntimeError(
+                "ComposedTransform.for_ladj() requires .enable_for_ladj() first."
+            )
+        return self._for_ladj_fn(x)
+
+    def enable_inv_ladj(self, mode: str = "reduce-overhead") -> ComposedTransform:
+        """Compile a fast ``.inv_ladj(x) == self.inv.call_and_ladj(x)`` path.
+
+        Like `enable_for_ladj` but for the inverse map: returns the fused
+        pre-image and the inverse map's log|det J|, i.e. (x_pre, ladj) where
+        `ladj == log|det J_{T^-1}(x)| == -log|det J_T(x_pre)|`. Same
+        non-idempotent / capture-and-refresh semantics as `enable_for_ladj`.
+            F = flow.t().enable_inv_ladj()
+            x_pre, ladj = F.inv_ladj(y)
+        """
+        self._inv_ladj_fn = torch.compile(lambda x: self.inv.call_and_ladj(x), mode=mode)
+        return self
+
+    def inv_ladj(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        """Compiled inverse + Jacobian: returns ``self.inv.call_and_ladj(x)``.
+
+        Input:
+            x: Tensor [N, d]   points in the codomain
+        Output:
+            x_pre: Tensor [N, d]   pre-images in the domain
+            ladj:  Tensor [N]      log|det J_{T^-1}(x)| (= -log|det J_T(x_pre)|)
+        Raises RuntimeError if .enable_inv_ladj() has not been called.
+        """
+        if self._inv_ladj_fn is None:
+            raise RuntimeError(
+                "ComposedTransform.inv_ladj() requires .enable_inv_ladj() first."
+            )
+        return self._inv_ladj_fn(x)
 
 
 class DependentTransform(Transform):

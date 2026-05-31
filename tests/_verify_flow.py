@@ -762,78 +762,81 @@ assert_close(y_cap,    y_fresh,    atol=1e-6, name="15c  OTFlow captured F sees 
 assert_close(ladj_cap, ladj_fresh, atol=1e-6, name="15c  OTFlow captured F sees param updates: ladj")
 
 
-banner("16. enable_for_ladj() + enable_inv_ladj() compiled maps")
-# 16a — gating: for_ladj / inv_ladj before enabling raise
+banner("16. ComposedTransform.enable_for_ladj() + enable_inv_ladj() compiled maps")
+# the compiled fused (points, ladj) fast paths live on ComposedTransform; the
+# canonical use is to capture F = flow.t() once and enable on it.
 flow_iv = NSF(a=[-4.0, -4.0], b=[4.0, 4.0], bins=8, transforms=4,
               hidden_features=(32, 32)).to(device)
+# 16a — gating: for_ladj / inv_ladj before enabling raise
 for meth in ("for_ladj", "inv_ladj"):
     raised = False
     try:
-        getattr(flow_iv, meth)(torch.randn(4, 2, device=device))
+        getattr(flow_iv.t(), meth)(torch.randn(4, 2, device=device))
     except RuntimeError as e:
         raised = True
         print(f"  16a  {meth}() before enable_{meth}() raised: {e}")
     assert raised, f"{meth}() must raise before enable_{meth}()"
-# 16b — chainable; NOT idempotent: every enable_*() recompiles a fresh fast
-#        path, so re-calling is how you refresh the capture after the flow changes
-assert flow_iv.enable_for_ladj() is flow_iv and flow_iv.enable_inv_ladj() is flow_iv, \
+# 16b — chainable; NOT idempotent: every enable_*() recompiles a fresh fast path
+F_iv = flow_iv.t()
+assert F_iv.enable_for_ladj() is F_iv and F_iv.enable_inv_ladj() is F_iv, \
     "enable_*() must return self"
-_ff, _fi = flow_iv._for_ladj_fn, flow_iv._inv_ladj_fn
-flow_iv.enable_for_ladj(); flow_iv.enable_inv_ladj()
-assert flow_iv._for_ladj_fn is not _ff and flow_iv._inv_ladj_fn is not _fi, \
+_ff, _fi = F_iv._for_ladj_fn, F_iv._inv_ladj_fn
+F_iv.enable_for_ladj(); F_iv.enable_inv_ladj()
+assert F_iv._for_ladj_fn is not _ff and F_iv._inv_ladj_fn is not _fi, \
     "enable_*() must recompile on every call (refresh), not no-op"
 print("  16b  enable_for_ladj()/enable_inv_ladj() are chainable and recompile-on-re-call")
-# 16c — for_ladj(x) matches t().call_and_ladj(x); inv_ladj(y) matches
-#        t().inv.call_and_ladj(y); both for points AND log|det J|
+# 16c — for_ladj(x) matches call_and_ladj(x); inv_ladj(y) matches
+#        inv.call_and_ladj(y); both for points AND log|det J|
 x16 = torch.randn(2000, 2, device=device)
 y16 = torch.randn(2000, 2, device=device) * 1.5
 with torch.no_grad():
-    y_c, lj_c = flow_iv.for_ladj(x16)
-    y_r, lj_r = flow_iv.t().call_and_ladj(x16)
-    assert_close(y_c,  y_r,  atol=1e-5, name="16c  for_ladj(x) y    == t().call_and_ladj y")
-    assert_close(lj_c, lj_r, atol=1e-5, name="16c  for_ladj(x) ladj == t().call_and_ladj ladj")
-    xi_c, ilj_c = flow_iv.inv_ladj(y16)
-    xi_r, ilj_r = flow_iv.t().inv.call_and_ladj(y16)
-    assert_close(xi_c,  xi_r,  atol=1e-5, name="16c  inv_ladj(y) x    == t().inv.call_and_ladj x")
-    assert_close(ilj_c, ilj_r, atol=1e-5, name="16c  inv_ladj(y) ladj == t().inv.call_and_ladj ladj")
-    assert_close(flow_iv.inv_ladj(flow_iv.for_ladj(x16)[0])[0], x16, atol=1e-4,
+    y_c, lj_c = F_iv.for_ladj(x16)
+    y_r, lj_r = F_iv.call_and_ladj(x16)
+    assert_close(y_c,  y_r,  atol=1e-5, name="16c  for_ladj(x) y    == call_and_ladj y")
+    assert_close(lj_c, lj_r, atol=1e-5, name="16c  for_ladj(x) ladj == call_and_ladj ladj")
+    xi_c, ilj_c = F_iv.inv_ladj(y16)
+    xi_r, ilj_r = F_iv.inv.call_and_ladj(y16)
+    assert_close(xi_c,  xi_r,  atol=1e-5, name="16c  inv_ladj(y) x    == inv.call_and_ladj x")
+    assert_close(ilj_c, ilj_r, atol=1e-5, name="16c  inv_ladj(y) ladj == inv.call_and_ladj ladj")
+    assert_close(F_iv.inv_ladj(F_iv.for_ladj(x16)[0])[0], x16, atol=1e-4,
                  name="16c  inv_ladj(for_ladj(x).y).x round-trips to x")
     # the two Jacobians are negatives at a matched (x, y=F(x)) pair
-    assert_close(flow_iv.inv_ladj(y_c)[1], -lj_c, atol=1e-4,
+    assert_close(F_iv.inv_ladj(y_c)[1], -lj_c, atol=1e-4,
                  name="16c  inv_ladj ladj == -for_ladj ladj at y=F(x)")
 # 16d — closed-form flow (RealNVP) too
 flow_rv = RealNVP(dimension=4, transforms=4, mixing="lu",
-                  hidden_features=(32, 32)).to(device).enable_for_ladj().enable_inv_ladj()
+                  hidden_features=(32, 32)).to(device)
+F_rv = flow_rv.t().enable_for_ladj().enable_inv_ladj()
 x16r = torch.randn(1000, 4, device=device)
 y16r = torch.randn(1000, 4, device=device)
 with torch.no_grad():
-    y_cr, lj_cr = flow_rv.for_ladj(x16r)
-    y_rr, lj_rr = flow_rv.t().call_and_ladj(x16r)
+    y_cr, lj_cr = F_rv.for_ladj(x16r)
+    y_rr, lj_rr = F_rv.call_and_ladj(x16r)
     assert_close(y_cr,  y_rr,  atol=1e-5, name="16d  RealNVP for_ladj y")
     assert_close(lj_cr, lj_rr, atol=1e-5, name="16d  RealNVP for_ladj ladj")
-    xi_cr, ilj_cr = flow_rv.inv_ladj(y16r)
-    xi_rr, ilj_rr = flow_rv.t().inv.call_and_ladj(y16r)
+    xi_cr, ilj_cr = F_rv.inv_ladj(y16r)
+    xi_rr, ilj_rr = F_rv.inv.call_and_ladj(y16r)
     assert_close(xi_cr,  xi_rr,  atol=1e-5, name="16d  RealNVP inv_ladj x")
     assert_close(ilj_cr, ilj_rr, atol=1e-5, name="16d  RealNVP inv_ladj ladj")
-# 16e — capture-once: compiled maps track in-place parameter updates
+# 16e — capture-once: the captured F_iv's compiled maps track in-place param updates
 opt16 = torch.optim.Adam(flow_iv.parameters(), lr=1e-2)
 loss16 = (flow_iv.t().call_and_ladj(torch.randn(256, 2, device=device))[0] ** 2).mean()
 opt16.zero_grad(); loss16.backward(); opt16.step()
 with torch.no_grad():
-    assert_close(flow_iv.for_ladj(x16)[0],  flow_iv.t().call_and_ladj(x16)[0],     atol=1e-5,
+    assert_close(F_iv.for_ladj(x16)[0], flow_iv.t().call_and_ladj(x16)[0],     atol=1e-5,
                  name="16e  for_ladj tracks params after optimizer.step()")
-    assert_close(flow_iv.inv_ladj(y16)[0], flow_iv.t().inv.call_and_ladj(y16)[0], atol=1e-5,
+    assert_close(F_iv.inv_ladj(y16)[0], flow_iv.t().inv.call_and_ladj(y16)[0], atol=1e-5,
                  name="16e  inv_ladj tracks params after optimizer.step()")
-# 16f — re-enabling refreshes the capture across a flow change (dtype/device
-#        move reallocates the parameters); the refreshed fast path is correct
+# 16f — after a flow change that reallocates parameters (dtype/device move),
+#        fetch a fresh flow.t() and enable on it; the refreshed path is correct
 flow_iv.to(torch.float64)
-flow_iv.enable_for_ladj(); flow_iv.enable_inv_ladj()   # refresh against the moved flow
+F_iv2 = flow_iv.t().enable_for_ladj().enable_inv_ladj()   # fresh transform after the move
 x16d, y16d = x16.double(), y16.double()
 with torch.no_grad():
-    assert_close(flow_iv.for_ladj(x16d)[0],  flow_iv.t().call_and_ladj(x16d)[0],     atol=1e-5,
-                 name="16f  re-enable refreshes for_ladj after .to(float64)")
-    assert_close(flow_iv.inv_ladj(y16d)[0], flow_iv.t().inv.call_and_ladj(y16d)[0], atol=1e-5,
-                 name="16f  re-enable refreshes inv_ladj after .to(float64)")
+    assert_close(F_iv2.for_ladj(x16d)[0], flow_iv.t().call_and_ladj(x16d)[0],     atol=1e-5,
+                 name="16f  fresh flow.t()+enable refreshes for_ladj after .to(float64)")
+    assert_close(F_iv2.inv_ladj(y16d)[0], flow_iv.t().inv.call_and_ladj(y16d)[0], atol=1e-5,
+                 name="16f  fresh flow.t()+enable refreshes inv_ladj after .to(float64)")
 
 # ─────────────────────────────────────────────────────────────────
 print()

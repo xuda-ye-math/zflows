@@ -83,61 +83,15 @@ def compute_CESS_log(source_weights: torch.Tensor, log_importance_weights: torch
 # Importance weights — log/linear-space SMC reweighting
 # ──────────────────────────────────────────────────────────────────────
 
-def importance_weights(samples: torch.Tensor, source: Potential, target: Potential, F: ComposedTransform, beta_source: float = 1.0, beta_target: float = 1.0, chunk: int = 1) -> torch.Tensor:
-    """
-    Linear-space self-normalized importance weights for the proposal
-    `nu = F_# mu_0` against the target `mu_1`, where the two ends are
-    the tempered Gibbs distributions
-        mu_0(x) ~ exp(-beta_source * source(x)),
-        mu_1(y) ~ exp(-beta_target * target(y)).
-    Thin convenience wrapper around `importance_weights_log`: subtract
-    the max log-weight for numerical stability, then exponentiate.
-
-        w_i = exp(log_w_i - max_j log_w_j),   w in [0, 1].
-
-    The omitted factor `exp(max log_w)` is a sample-dependent scalar
-    that cancels in every *self-normalized* downstream use (ratios in
-    compute_ESS, draws from compute_ESS_log / resample, MC averages of
-    bounded test functions). Use this routine when the consumer expects
-    plain non-negative weights (e.g. `resample(samples, weights)`); use
-    `importance_weights_log` + `compute_ESS_log` / `compute_CESS_log`
-    when log-space stability is required (very-low-overlap proposals,
-    tail diagnostics).
-
-    Input:
-        samples:     Tensor [N, d]      particles drawn from `source`
-        source:      Potential          source (proposal-base) potential U_0
-        target:      Potential          target potential U_1
-        F:           ComposedTransform  forward flow map (typically obtained as flow.t())
-        beta_source: float              inverse temperature of the source
-                                        distribution (default 1.0).
-        beta_target: float              inverse temperature of the target
-                                        distribution (default 1.0). Pair this
-                                        with the same beta that was passed to
-                                        the loss / Langevin / HMC so the
-                                        weights match the tempered training
-                                        objective.
-        chunk:       int                split `samples` along dim 0 into this many
-                                        chunks and accumulate. Reduces peak GPU
-                                        memory at the cost of wall time;
-                                        statistically and numerically equivalent
-                                        to chunk=1 (the per-sample log-weight
-                                        only depends on its own (x, F(x))).
-    Output:
-        w: Tensor [N]   unnormalized importance weights in [0, 1].
-    """
-    log_w = importance_weights_log(samples, source, target, F, beta_source=beta_source, beta_target=beta_target, chunk=chunk)
-    return (log_w - log_w.max()).exp()
-
-def importance_weights_log(samples: torch.Tensor, source: Potential, target: Potential, F: ComposedTransform, beta_source: float = 1.0, beta_target: float = 1.0, chunk: int = 1) -> torch.Tensor:
+def importance_weights_log_F(samples: torch.Tensor, source: Potential, target: Potential, F: ComposedTransform, beta_source: float = 1.0, beta_target: float = 1.0, chunk: int = 1) -> torch.Tensor:
     """
     Self-normalized importance-sampling log-weights for the proposal
     `nu = F_# mu_0` against the target `mu_1`, where the source and
     target are the tempered Gibbs distributions
         mu_0(x) ~ exp(-beta_source * source(x)),
         mu_1(y) ~ exp(-beta_target * target(y)),
-    and `F` is the trained bijection that pushes source samples
-    toward the target.
+    and `F` is the trained FORWARD bijection (source -> target) that pushes
+    source samples toward the target.
 
     For x drawn from the (beta_source-tempered) source, y = F(x), the
     proposal density is
@@ -150,15 +104,21 @@ def importance_weights_log(samples: torch.Tensor, source: Potential, target: Pot
     that cancel after self-normalization). Default
     beta_source = beta_target = 1.0 recovers the standard case.
 
-    Use the regular forward call (`source(x)`, `target(y)`); no
-    `enable_eval()` opt-in is needed here since this routine is not on
-    the per-iter MALA hot path.
+    `importance_weights_log` is an alias for this forward-map variant; the
+    twin `importance_weights_log_G` is identical but takes the INVERSE map
+    `G = F^{-1}` (target -> source). If `F.enable_for_ladj()` has been called
+    on the transform, the compiled fused `(y, log|det J_F|)` map is used here;
+    otherwise the raw `F.call_and_ladj`. `source(x)` / `target(y)` go through
+    the regular forward call (no `enable_eval()` opt-in needed — not on the
+    per-iter MALA hot path).
 
     Input:
         samples:     Tensor [N, d]      particles drawn from `source`
         source:      Potential          source (proposal-base) potential U_0
         target:      Potential          target potential U_1
-        F:           ComposedTransform  forward flow map (typically obtained as flow.t())
+        F:           ComposedTransform  forward flow map (e.g. flow.t()); uses
+                                        `F.for_ladj` if `F.enable_for_ladj()` was
+                                        called, else `F.call_and_ladj`.
         beta_source: float              inverse temperature of the source
                                         distribution (default 1.0).
         beta_target: float              inverse temperature of the target
@@ -179,11 +139,108 @@ def importance_weights_log(samples: torch.Tensor, source: Potential, target: Pot
                             to feed into compute_ESS_log / compute_CESS_log
                             or to exponentiate (after subtracting max).
     """
+    push = F.for_ladj if F._for_ladj_fn is not None else F.call_and_ladj
     out = []
     for x in torch.chunk(samples, chunk, dim=0):
-        y, ladj = F.call_and_ladj(x)
+        y, ladj = push(x) # y = F(x), ladj = log|det J_F(x)|
         out.append(-beta_target * target(y) + beta_source * source(x) + ladj)
     return torch.cat(out, dim=0)
+
+def importance_weights_log_G(samples: torch.Tensor, source: Potential, target: Potential, G: ComposedTransform, beta_source: float = 1.0, beta_target: float = 1.0, chunk: int = 1) -> torch.Tensor:
+    """
+    Inverse-map twin of `importance_weights_log_F`: the same self-normalized
+    IS log-weights for `nu = F_# mu_0` against `mu_1`, but the flow is supplied
+    as the INVERSE map `G = F^{-1}` (target -> source) rather than the forward
+    `F` (same convention as `reverse_KL_F` / `reverse_KL_G`).
+
+    For x ~ source, the forward image is `y = F(x) = G^{-1}(x)`, recovered via
+    `G.inv.call_and_ladj(x) -> (y, log|det J_{G^-1}(x)|)` with
+        log|det J_{G^-1}(x)| = log|det J_F(x)|,
+    so the weight is identical to the `_F` variant:
+        log w(y) = -beta_target * target(y) + beta_source * source(x)
+                   + log|det J_F(x)|.
+    If `G.enable_inv_ladj()` has been called, the compiled fused map
+    (`G.inv_ladj == G.inv.call_and_ladj`) is used; otherwise the raw
+    `G.inv.call_and_ladj`.
+
+    Input:
+        samples:     Tensor [N, d]      particles drawn from `source`
+        source:      Potential          source (proposal-base) potential U_0
+        target:      Potential          target potential U_1
+        G:           ComposedTransform  inverse flow map target -> source
+                                        (G = F^{-1}, e.g. flow.t()); uses
+                                        `G.inv_ladj` if `G.enable_inv_ladj()` was
+                                        called, else `G.inv.call_and_ladj`.
+        beta_source: float              inverse temperature of the source (default 1.0).
+        beta_target: float              inverse temperature of the target (default 1.0).
+        chunk:       int                split `samples` along dim 0 into this many
+                                        chunks and concatenate the per-chunk
+                                        log-weights (statistically / numerically
+                                        equivalent to chunk=1).
+    Output:
+        log_w: Tensor [N]   unnormalized log importance weights.
+    """
+    push = G.inv_ladj if G._inv_ladj_fn is not None else G.inv.call_and_ladj
+    out = []
+    for x in torch.chunk(samples, chunk, dim=0):
+        y, ladj = push(x) # y = G^{-1}(x) = F(x), ladj = log|det J_{G^-1}(x)| = log|det J_F(x)|
+        out.append(-beta_target * target(y) + beta_source * source(x) + ladj)
+    return torch.cat(out, dim=0)
+
+# alias: the forward-map variant is the default importance-weight log-routine
+importance_weights_log = importance_weights_log_F
+
+def importance_weights_F(samples: torch.Tensor, source: Potential, target: Potential, F: ComposedTransform, beta_source: float = 1.0, beta_target: float = 1.0, chunk: int = 1) -> torch.Tensor:
+    """
+    Linear-space self-normalized importance weights for the proposal
+    `nu = F_# mu_0` against the target `mu_1` (FORWARD-map variant). Thin
+    convenience wrapper around `importance_weights_log_F`: subtract the max
+    log-weight for numerical stability, then exponentiate.
+
+        w_i = exp(log_w_i - max_j log_w_j),   w in [0, 1].
+
+    The omitted factor `exp(max log_w)` is a sample-dependent scalar that
+    cancels in every *self-normalized* downstream use (ratios in compute_ESS,
+    draws from compute_ESS_log / resample, MC averages of bounded test
+    functions). Use this when the consumer expects plain non-negative weights
+    (e.g. `resample(samples, weights)`); use `importance_weights_log_F` +
+    `compute_ESS_log` / `compute_CESS_log` when log-space stability is required.
+
+    `importance_weights` is an alias for this; `importance_weights_G` is the
+    inverse-map (`G = F^{-1}`) twin. As with `importance_weights_log_F`, the
+    compiled `F.for_ladj` fast path is used when `F.enable_for_ladj()` was called.
+
+    Input:
+        samples:     Tensor [N, d]      particles drawn from `source`
+        source:      Potential          source (proposal-base) potential U_0
+        target:      Potential          target potential U_1
+        F:           ComposedTransform  forward flow map (e.g. flow.t())
+        beta_source: float              inverse temperature of the source (default 1.0).
+        beta_target: float              inverse temperature of the target (default 1.0).
+        chunk:       int                split `samples` along dim 0 into this many chunks.
+    Output:
+        w: Tensor [N]   unnormalized importance weights in [0, 1].
+    """
+    log_w = importance_weights_log_F(samples, source, target, F, beta_source=beta_source, beta_target=beta_target, chunk=chunk)
+    return (log_w - log_w.max()).exp()
+
+def importance_weights_G(samples: torch.Tensor, source: Potential, target: Potential, G: ComposedTransform, beta_source: float = 1.0, beta_target: float = 1.0, chunk: int = 1) -> torch.Tensor:
+    """
+    Inverse-map twin of `importance_weights_F`: linear-space self-normalized
+    importance weights with the flow supplied as the INVERSE map `G = F^{-1}`
+    (target -> source). Thin wrapper around `importance_weights_log_G`
+    (subtract max log-weight, exponentiate). Uses the compiled `G.inv_ladj`
+    fast path when `G.enable_inv_ladj()` was called.
+
+    Input: as `importance_weights_F`, but `G: ComposedTransform` is the inverse map.
+    Output:
+        w: Tensor [N]   unnormalized importance weights in [0, 1].
+    """
+    log_w = importance_weights_log_G(samples, source, target, G, beta_source=beta_source, beta_target=beta_target, chunk=chunk)
+    return (log_w - log_w.max()).exp()
+
+# alias: the forward-map variant is the default importance-weight routine
+importance_weights = importance_weights_F
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -485,7 +542,7 @@ def annealed_importance_sampling_F(samples: torch.Tensor, source: Potential, tar
     forward and `F.inv(y)` recovers its latent pre-image. The twin
     `annealed_importance_sampling_G` is identical but takes the **inverse** map
     `G = F^{-1}` (target -> source) instead, swapping `F(x) <-> G.inv(x)` and
-    `F.inv(y) <-> G(y)` (same convention as `source_KL_F` / `source_KL_G`).
+    `F.inv(y) <-> G(y)` (same convention as `reverse_KL_F` / `reverse_KL_G`).
 
     Annealing follows the geometric path between the flow proposal and the
     target,
@@ -524,15 +581,22 @@ def annealed_importance_sampling_F(samples: torch.Tensor, source: Potential, tar
     Requires `target.enable_grad()` (the Langevin rejuvenation calls
     `target.grad`); otherwise raises RuntimeError. `source` is only ever called
     in the forward direction for the weights, so it needs no `enable_grad`. `F`
-    must support `F.inv` (the latent refresh) and `F.call_and_ladj`.
+    must support `F.inv` (the latent refresh) and `F.call_and_ladj`. The per-rung
+    energy reweighting routes `target` / `source` through their compiled
+    `.eval(x)` fast path when `.enable_eval()` has been called (same opt-in as
+    `langevin` / `hmc`), else the plain `__call__`.
 
     Input:
         samples:     Tensor [N, d]      particles drawn from mu_0 (source space)
         source:      Potential          source potential U_0 = -log mu_0
         target:      Potential          target potential U_1 = -log mu_1
                                         (must be enable_grad()'d)
-        F:           ComposedTransform  trained flow map (e.g. flow.t()); must
-                                        support .inv and .call_and_ladj
+        F:           ComposedTransform  trained forward flow map (e.g. flow.t()).
+                                        If `F.enable_for_ladj()` / `F.enable_inv_ladj()`
+                                        have been called, those compiled fused maps
+                                        are used (the inverse fast path replaces
+                                        `F.inv` + `F.call_and_ladj` with a single
+                                        pass); otherwise the raw transform is used.
         beta_source: float              inverse temperature of the source (default 1.0)
         beta_target: float              inverse temperature of the target (default
                                         1.0); also the Langevin rejuvenation temperature
@@ -556,9 +620,24 @@ def annealed_importance_sampling_F(samples: torch.Tensor, source: Potential, tar
             f"{type(target).__name__}.enable_grad() before passing it in."
         )
     M = ladder
+    # If `F` has the compiled fused fast paths enabled (F.enable_for_ladj() /
+    # F.enable_inv_ladj()), use them:
+    #   for_ladj(x) == F.call_and_ladj(x)      -> (y, log|det J_F(x)|)
+    #   inv_ladj(y) == F.inv.call_and_ladj(y)  -> (x, log|det J_{F^-1}(y)| = -log|det J_F(x)|)
+    # the inverse fast path fuses the bisection + Jacobian into one pass (vs the
+    # raw `F.inv(y)` then `F.call_and_ladj(x)`). Otherwise use the raw transform.
+    for_ladj = F.for_ladj if F._for_ladj_fn is not None else None
+    inv_ladj = F.inv_ladj if F._inv_ladj_fn is not None else None
+    # Energy reweighting uses the compiled `.eval` fast path when the potentials
+    # have it (same opt-in as langevin / hmc), else the raw __call__. Safe under
+    # reduce-overhead: each `beta * <eval>` allocates a fresh tensor before the
+    # next `.eval` overwrites its static buffer.
+    t_eval = target.eval if target._eval_fn is not None else target
+    s_eval = source.eval if source._eval_fn is not None else source
     # (0) push the source samples through F to obtain pi_0 = F_# mu_0.
     with torch.no_grad():
-        y = torch.cat([F.call_and_ladj(xc)[0] for xc in torch.chunk(samples, chunk, dim=0)], dim=0)
+        push = for_ladj if for_ladj is not None else F.call_and_ladj
+        y = torch.cat([push(xc)[0] for xc in torch.chunk(samples, chunk, dim=0)], dim=0)
     for _ in range(M):
         # (1) incremental weights w(y) ** (1 / M). For each particle y, refresh
         #     its latent pre-image x = F^{-1}(y) and reuse the
@@ -568,9 +647,13 @@ def annealed_importance_sampling_F(samples: torch.Tensor, source: Potential, tar
         with torch.no_grad():
             parts = []
             for yc in torch.chunk(y, chunk, dim=0):
-                xc = F.inv(yc) # x = F^{-1}(y)
-                _, ladj = F.call_and_ladj(xc) # ladj = log|det J_F(x)|
-                parts.append((-beta_target * target(yc) + beta_source * source(xc) + ladj) / M)
+                if inv_ladj is not None:
+                    xc, ladj_inv = inv_ladj(yc) # fused inverse + inverse Jacobian
+                    ladj = -ladj_inv # log|det J_F(x)| = -log|det J_{F^-1}(y)|
+                else:
+                    xc = F.inv(yc) # x = F^{-1}(y)
+                    _, ladj = F.call_and_ladj(xc) # ladj = log|det J_F(x)|
+                parts.append((-beta_target * t_eval(yc) + beta_source * s_eval(xc) + ladj) / M)
             log_w = torch.cat(parts, dim=0)
             w = (log_w - log_w.max()).exp() # self-normalised, in [0, 1]
         # (2) resample onto high-weight particles, then rejuvenate in mu_1.
@@ -588,7 +671,7 @@ def annealed_importance_sampling_G(samples: torch.Tensor, source: Potential, tar
     the routine returns samples from `mu_1`.
 
     The only difference from the `_F` variant is which direction of the flow each
-    call uses (same convention as `source_KL_F` / `source_KL_G`):
+    call uses (same convention as `reverse_KL_F` / `reverse_KL_G`):
         F(x)      <-> G.inv(x)      (push a source sample forward to mu_1)
         F^{-1}(y) <-> G(y)          (recover a target sample's latent pre-image)
     and the Jacobian read off `G` is the inverse one,
@@ -614,7 +697,9 @@ def annealed_importance_sampling_G(samples: torch.Tensor, source: Potential, tar
     `mu_1` directly (not the exact intermediate `pi_k`), and only
     `target.enable_grad()` is required (`source` is forward-only). `G` must
     support `G.inv` (the forward push) and `G.call_and_ladj` (the latent refresh
-    + inverse Jacobian).
+    + inverse Jacobian). The per-rung energy reweighting routes `target` /
+    `source` through their compiled `.eval(x)` fast path when `.enable_eval()`
+    has been called (else the plain `__call__`).
 
     Input:
         samples:     Tensor [N, d]      particles drawn from mu_0 (source space)
@@ -622,8 +707,12 @@ def annealed_importance_sampling_G(samples: torch.Tensor, source: Potential, tar
         target:      Potential          target potential U_1 = -log mu_1
                                         (must be enable_grad()'d)
         G:           ComposedTransform  trained inverse flow map target -> source
-                                        (G = F^{-1}, e.g. flow.t()); must support
-                                        .inv and .call_and_ladj
+                                        (G = F^{-1}, e.g. flow.t()). If
+                                        `G.enable_for_ladj()` / `G.enable_inv_ladj()`
+                                        have been called, those compiled fused maps
+                                        are used (here `inv_ladj` is the source->target
+                                        push and `for_ladj` the latent refresh);
+                                        otherwise the raw transform is used.
         beta_source: float              inverse temperature of the source (default 1.0)
         beta_target: float              inverse temperature of the target (default
                                         1.0); also the Langevin rejuvenation temperature
@@ -645,9 +734,21 @@ def annealed_importance_sampling_G(samples: torch.Tensor, source: Potential, tar
             f"{type(target).__name__}.enable_grad() before passing it in."
         )
     M = ladder
+    # If `G` has the compiled fused fast paths enabled, use them. Note the
+    # directions are mirrored vs the `_F` variant (G is the target->source map):
+    #   for_ladj(y) == G.call_and_ladj(y)      == G(y), G's forward (latent refresh)
+    #   inv_ladj(x) == G.inv.call_and_ladj(x)  == G.inv(x), the source->target push
+    # Otherwise use the raw transform.
+    for_ladj = G.for_ladj if G._for_ladj_fn is not None else None
+    inv_ladj = G.inv_ladj if G._inv_ladj_fn is not None else None
+    # Energy reweighting uses the compiled `.eval` fast path when available
+    # (same opt-in as langevin / hmc), else the raw __call__.
+    t_eval = target.eval if target._eval_fn is not None else target
+    s_eval = source.eval if source._eval_fn is not None else source
     # (0) push the source samples forward through F = G^{-1} to obtain pi_0 = F_# mu_0.
     with torch.no_grad():
-        y = torch.cat([G.inv.call_and_ladj(xc)[0] for xc in torch.chunk(samples, chunk, dim=0)], dim=0)
+        push = inv_ladj if inv_ladj is not None else G.inv.call_and_ladj
+        y = torch.cat([push(xc)[0] for xc in torch.chunk(samples, chunk, dim=0)], dim=0)
     for _ in range(M):
         # (1) incremental weights w(y) ** (1 / M). For each particle y, refresh
         #     its latent pre-image x = G(y) (= F^{-1}(y)) and reuse the
@@ -655,16 +756,22 @@ def annealed_importance_sampling_G(samples: torch.Tensor, source: Potential, tar
         #         log w = -beta_target * target(y) + beta_source * source(x) - ladj(y),
         #     where ladj(y) = log|det J_G(y)| = -log|det J_F(x)|; scale by 1/M.
         with torch.no_grad():
+            refresh = for_ladj if for_ladj is not None else G.call_and_ladj
             parts = []
             for yc in torch.chunk(y, chunk, dim=0):
-                xc, ladj = G.call_and_ladj(yc) # x = G(y) = F^{-1}(y), ladj = log|det J_G(y)|
-                parts.append((-beta_target * target(yc) + beta_source * source(xc) - ladj) / M)
+                xc, ladj = refresh(yc) # x = G(y) = F^{-1}(y), ladj = log|det J_G(y)|
+                parts.append((-beta_target * t_eval(yc) + beta_source * s_eval(xc) - ladj) / M)
             log_w = torch.cat(parts, dim=0)
             w = (log_w - log_w.max()).exp() # self-normalised, in [0, 1]
         # (2) resample onto high-weight particles, then rejuvenate in mu_1.
         y = resample(y, w)
         y = langevin(y, target, beta=beta_target, step=step, iters=iters, chunk=chunk)
     return y
+
+
+# alias: the forward-map variant is the default annealed importance sampler
+annealed_importance_sampling = annealed_importance_sampling_F
+
 
 def stochastic_heun(samples: torch.Tensor, potential: Potential, beta: float = 1.0, step: float = 1e-3, iters: int = 100, chunk: int = 1) -> torch.Tensor:
     """

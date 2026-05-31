@@ -1,6 +1,6 @@
-# Benchmark: `flow.for_ladj` / `flow.inv_ladj` vs. raw `flow.t().call_and_ladj`
+# Benchmark: `F.for_ladj` / `F.inv_ladj` vs. raw `flow.t().call_and_ladj`  (`F = flow.t()`)
 
-A **performance** test (sibling of [`compare_compiled_loss.md`](compare_compiled_loss.md)). It measures how much faster the forward and inverse maps of an `NSF` — each fused with its `log|det J|` — get when you compile them via the optional `Flow.enable_for_ladj()` / `Flow.enable_inv_ladj()` fast paths, instead of calling the obvious
+A **performance** test (sibling of [`compare_compiled_loss.md`](compare_compiled_loss.md)). It measures how much faster the forward and inverse maps of an `NSF` — each fused with its `log|det J|` — get when you compile them via the optional `ComposedTransform.enable_for_ladj()` / `ComposedTransform.enable_inv_ladj()` fast paths (on `F = flow.t()`), instead of calling the obvious
 
 ```python
 y,      ladj     = flow.t().call_and_ladj(x)        # forward + Jacobian
@@ -13,22 +13,22 @@ on every step. Numbers are the **pure map** wall-clock under `torch.no_grad()` �
 
 The natural way to push points through a trained flow is `flow.t().call_and_ladj(x)` / `flow.t().inv.call_and_ladj(y)`. That works, but each call reconstructs a fresh `ComposedTransform`, walks the lazy `AutoregressiveTransform` list in Python, and launches dozens of tiny CUDA kernels — so at small `d` it is **host-side-overhead-bound**, not GPU-compute-bound. The inverse is worse: for spline flows it is a per-coordinate bisection, i.e. many sequential tiny ops.
 
-`Flow.enable_for_ladj(mode=...)` / `Flow.enable_inv_ladj(mode=...)` (in [`zflows/flow.py`](../zflows/flow.py)) are the fix, mirroring `Potential.enable_grad`: each captures `F = self.t()` and `torch.compile`s it, returning `flow.for_ladj(x) == flow.t().call_and_ladj(x)` → `(y, ladj)` and `flow.inv_ladj(y) == flow.t().inv.call_and_ladj(y)` → `(x_pre, ladj_inv)`. Both hand back the **fused `(points, log|det J|)`** — `inv_ladj`'s ladj is the inverse map's, i.e. `−log|det J_F|` at the pre-image. This benchmark answers: *how much do you get for that one-line opt-in?*
+`ComposedTransform.enable_for_ladj(mode=...)` / `enable_inv_ladj(mode=...)` (in [`zflows/core/transforms.py`](../zflows/core/transforms.py)) are the fix, mirroring `Potential.enable_grad`: on `F = flow.t()` they `torch.compile` the transform, so `F.for_ladj(x) == F.call_and_ladj(x)` → `(y, ladj)` and `F.inv_ladj(y) == F.inv.call_and_ladj(y)` → `(x_pre, ladj_inv)`. Both hand back the **fused `(points, log|det J|)`** — `inv_ladj`'s ladj is the inverse map's, i.e. `−log|det J_F|` at the pre-image. This benchmark answers: *how much do you get for that one-line opt-in?*
 
 ## ⚠️ Do you need to re-enable after changing the flow?
 
-The one thing to internalize: `enable_for_ladj` / `enable_inv_ladj` bind to `F = self.t()` at enable time, and `F` re-reads the flow's parameter **tensors** on every call. So the answer splits cleanly:
+The one thing to internalize: a compiled `F = flow.t()` binds to its parameter **tensors** but re-reads them by attribute on every call. So the answer splits cleanly:
 
-- **NO — in-place parameter updates are reflected automatically.** `optimizer.step()`, `load_state_dict(...)`, and `zeros()` all mutate the existing parameter tensors *in place* (same objects, same memory). The captured `F` reads those same tensors, so `for_ladj` / `inv_ladj` already return the updated map with **no re-enable**. Verified in `_verify_flow.py` §16e (still match `flow.t()` after an `Adam.step()`).
+- **NO — in-place parameter updates are reflected automatically.** `optimizer.step()`, `load_state_dict(...)`, and `zeros()` all mutate the existing parameter tensors *in place* (same objects, same memory). The captured `F` reads those same tensors, so `F.for_ladj` / `F.inv_ladj` already return the updated map with **no re-enable**. Verified in `_verify_flow.py` §16e (still match `flow.t()` after an `Adam.step()`).
 
-- **YES — if the parameters become *different* tensors, re-enable to refresh.** A `.to(device)` / `.to(dtype)` move, swapping a submodule (`flow.layer = NewLayer(...)`), or rebuilding the flow allocates **new** parameter tensors; the previously compiled artifact is now stale (under `mode='reduce-overhead'` it even points at freed CUDA-graph memory). Just call `enable_*` again:
+- **YES — if the parameters become *different* tensors, refresh by fetching a fresh `flow.t()`.** A `.to(device)` / `.to(dtype)` move, swapping a submodule (`flow.layer = NewLayer(...)`), or rebuilding the flow allocates **new** parameter tensors; the previously compiled `F` is now stale (under `mode='reduce-overhead'` it even points at freed CUDA-graph memory). Grab a fresh transform and enable on it:
 
   ```python
-  flow.to(torch.float64)                    # parameters reallocated
-  flow.enable_for_ladj().enable_inv_ladj()  # recompile against the new flow.t()
+  flow.to(torch.float64)                              # parameters reallocated
+  F = flow.t().enable_for_ladj().enable_inv_ladj()    # fresh transform, recompiled
   ```
 
-  This works **because `enable_for_ladj` / `enable_inv_ladj` are deliberately NOT idempotent** — each call rebuilds `F = self.t()` and recompiles a fresh `_for_ladj_fn` / `_inv_ladj_fn`. (An earlier version early-returned if already enabled; that guard was removed precisely so re-calling refreshes.) Verified in `_verify_flow.py` §16f (`.to(float64)` + re-enable stays correct) and §16b (re-call yields a fresh compiled fn).
+  Re-calling `enable_*` on the **same** `F` also recompiles — these are deliberately **NOT idempotent** (each call rebuilds a fresh `_for_ladj_fn` / `_inv_ladj_fn`; an earlier version early-returned, that guard was removed precisely so re-calling refreshes) — but after a structural change the cleanest move is a fresh `flow.t()`. Verified in `_verify_flow.py` §16f (`.to(float64)` + fresh-`flow.t()` enable stays correct) and §16b (re-call yields a fresh compiled fn).
 
 **Rule of thumb:** enable once after the flow's structure/device/dtype is set; re-enable only when you *reallocated* parameters (not for ordinary training, which updates in place). Each (re-)enable pays the one-time torch.compile cost.
 
@@ -36,10 +36,12 @@ The one thing to internalize: `enable_for_ladj` / `enable_inv_ladj` bind to `F =
 
 ## The core mechanism
 
+These methods live on **`ComposedTransform`** (`zflows/core/transforms.py`), so `self` *is* the transform:
+
 ```python
+# on ComposedTransform:
 def enable_inv_ladj(self, mode="reduce-overhead"):
-    F = self.t()  # rebuilt each call so re-enabling refreshes the capture
-    self._inv_ladj_fn = torch.compile(lambda x: F.inv.call_and_ladj(x), mode=mode)
+    self._inv_ladj_fn = torch.compile(lambda x: self.inv.call_and_ladj(x), mode=mode)
     return self
 
 def inv_ladj(self, x):  # -> (x_pre, ladj_inv)
@@ -48,7 +50,7 @@ def inv_ladj(self, x):  # -> (x_pre, ladj_inv)
     return self._inv_ladj_fn(x)
 ```
 
-`enable_for_ladj` is identical with `F.call_and_ladj(x)` instead of `F.inv.call_and_ladj(x)`. Both return the fused `(points, log|det J|)`. The compiled path additionally saves the per-call `flow.t()` reconstruction the raw pattern pays.
+`enable_for_ladj` is identical with `self.call_and_ladj(x)` instead of `self.inv.call_and_ladj(x)`. Both return the fused `(points, log|det J|)`. Capture `F = flow.t()` once, enable on it, and reuse `F` — that also saves the per-call `flow.t()` reconstruction the raw pattern pays.
 
 ## Methodology
 
@@ -114,7 +116,7 @@ Things to notice:
 
 - **The gain shrinks as the MLP widens.** Within a fixed `d`, going (64,64) → (256,256) lowers the ratio (e.g. `d=8`: 12.7× → 6.9× inverse) because real GPU compute becomes a larger fraction of the call, leaving less Python overhead to amortize.
 
-**Takeaway.** When you repeatedly map a fixed-shape batch through a *finalized* flow — e.g. the `G⁻¹` source-pushforward in [`utils.annealed_importance_sampling_G`](../zflows/utils.py), or any inference/inversion loop — `flow.enable_for_ladj()` / `flow.enable_inv_ladj()` give a real **~3–21× per-call speedup**, largest exactly where the eager map hurts most (high `d`, the inverse). Just heed the re-enable rules above: enable *after* the flow is structurally final, re-enable after a reallocation.
+**Takeaway.** When you repeatedly map a fixed-shape batch through a *finalized* flow — e.g. the `G⁻¹` source-pushforward in [`utils.annealed_importance_sampling_G`](../zflows/utils.py), or any inference/inversion loop — capturing `F = flow.t()` and calling `F.enable_for_ladj()` / `F.enable_inv_ladj()` gives a real **~3–21× per-call speedup**, largest exactly where the eager map hurts most (high `d`, the inverse). Just heed the re-enable rules above: enable *after* the flow is structurally final, refresh (fresh `flow.t()`) after a reallocation.
 
 ## Caveats
 

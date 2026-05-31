@@ -231,10 +231,6 @@ plt.savefig(png, dpi=200)
 plt.close(fig)
 print(f"  scatter saved → {png}")
 
-ulc.release()
-u_source.release()
-u_target.release()
-
 # B.3 — linear_combination normalises every coeff input to list[float].
 # Whatever the user passes (list, tuple, 1-d Tensor, requires_grad=True
 # tensor, None), `self.coeffs` must come out as a plain Python list of
