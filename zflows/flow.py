@@ -55,9 +55,146 @@ class Flow(nn.Module, ABC):
 
     `flow.t()` is the only supported access path; do not invoke any
     internal `forward`/`__call__` directly.
+
+    Optional compiled fast paths (mirror Potential.enable_grad): each
+    torch.compiles `self.t()`. Both return the fused `(points, log|det J|)`.
+
+        flow.enable_for_ladj()                  # compile the forward + Jacobian
+        y, ladj     = flow.for_ladj(x)          # == flow.t().call_and_ladj(x),     compiled
+        flow.enable_inv_ladj()                  # compile the inverse + Jacobian
+        x_back, ilj = flow.inv_ladj(y)          # == flow.t().inv.call_and_ladj(y), compiled
+
+    Use them when a forward/inverse map is the bottleneck and called
+    repeatedly on a fixed shape (e.g. the `G^{-1}` source-pushforward in
+    `utils.annealed_importance_sampling_G`), where the spline / ODE map
+    otherwise dominates wall time. `for_ladj` returns the image and its
+    log|det J_F(x)|; `inv_ladj` returns the pre-image and its
+    log|det J_{F^{-1}}(x)| (note `inv_ladj`'s ladj is the *inverse* map's,
+    i.e. `-log|det J_F|` at the pre-image).
+
+    Do you need to re-enable after changing the flow?
+      - NO  — in-place parameter updates (`optimizer.step()`,
+              `load_state_dict()`, `zeros()`) are reflected automatically;
+              the captured `F` re-reads the same parameter tensors.
+      - YES — if the parameters became *different* tensors (`.to(device)` /
+              `.to(dtype)`, a swapped submodule, rebuilding the flow), the
+              old compile is stale; call `enable_for_ladj()` /
+              `enable_inv_ladj()` again to recompile against the new `self.t()`.
+    To allow that, `enable_for_ladj` / `enable_inv_ladj` are deliberately
+    **not idempotent** — each call rebuilds and recompiles (paying the
+    torch.compile cost). See `tests/compare_compiled_inverse.md`.
     """
+
+    _for_ladj_fn = None # populated by enable_for_ladj()
+    _inv_ladj_fn = None # populated by enable_inv_ladj()
+
     @abstractmethod
     def t(self) -> ComposedTransform: ...
+
+    def enable_for_ladj(self, mode: str = "reduce-overhead") -> "Flow":
+        """Compile a fast ``.for_ladj(x) == self.t().call_and_ladj(x)`` path.
+
+        The compiled forward returns BOTH the image and its log|det J|, i.e.
+        the fused `(y, ladj)` of `ComposedTransform.call_and_ladj`. Returns
+        self so the call can be chained, e.g.
+            flow = NSF(...).to(device).enable_for_ladj()
+
+        Do you need to call this again after changing the flow?
+
+          - NO, if you updated parameters IN PLACE — `optimizer.step()`,
+            `load_state_dict(...)`, `zeros()`. The captured `F` re-reads the
+            same parameter tensors on every call, so `for_ladj` already
+            reflects the update automatically. Nothing to do.
+          - YES, if the parameters became DIFFERENT tensors — `.to(device)` /
+            `.to(dtype)`, swapping a submodule, rebuilding the flow. The old
+            compiled artifact is now stale; call `enable_for_ladj()` again
+            to recompile against the new `self.t()`.
+
+        To make that refresh possible, this method is deliberately **not
+        idempotent**: every call rebuilds `F = self.t()` and recompiles (a
+        fresh `_for_ladj_fn`). Each call pays the torch.compile cost, so
+        enable once after setup and re-call only when you reallocated
+        parameters.
+
+        Argument:
+            mode: passed through to torch.compile. The default
+                "reduce-overhead" captures a CUDA graph on the first
+                `.for_ladj(x)` call (fastest for fixed-shape inputs). Pass
+                "default" if the batch shape varies between calls or GPU
+                memory is tight, or "max-autotune" for extra kernel tuning.
+        """
+        F = self.t() # rebuilt each call so re-enabling refreshes the capture
+        self._for_ladj_fn = torch.compile(lambda x: F.call_and_ladj(x), mode=mode)
+        return self
+
+    def for_ladj(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        """Compiled forward + Jacobian: returns ``self.t().call_and_ladj(x)``.
+
+        Input:
+            x: Tensor [N, d]   points in the flow's domain (input space)
+        Output:
+            y:    Tensor [N, d]   images in the codomain (output space)
+            ladj: Tensor [N]      log|det J_F(x)|
+        Raises RuntimeError if .enable_for_ladj() has not been called.
+        """
+        if self._for_ladj_fn is None:
+            raise RuntimeError(
+                f"{type(self).__name__}.for_ladj() requires .enable_for_ladj() first."
+            )
+        return self._for_ladj_fn(x)
+
+    def enable_inv_ladj(self, mode: str = "reduce-overhead") -> "Flow":
+        """Compile a fast ``.inv_ladj(x) == self.t().inv.call_and_ladj(x)`` path.
+
+        The compiled inverse returns BOTH the pre-image and the inverse map's
+        log|det J|, i.e. the fused `(x_pre, ladj)` of
+        `ComposedTransform.inv.call_and_ladj` (so `ladj == log|det J_{F^-1}(x)|
+        == -log|det J_F(x_pre)|`). Returns self so the call can be chained, e.g.
+            flow = NSF(...).to(device).enable_inv_ladj()
+
+        Do you need to call this again after changing the flow?
+
+          - NO, if you updated parameters IN PLACE — `optimizer.step()`,
+            `load_state_dict(...)`, `zeros()`. The captured `F` re-reads the
+            same parameter tensors on every call, so `inv_ladj` already
+            reflects the update automatically. Nothing to do.
+          - YES, if the parameters became DIFFERENT tensors — `.to(device)` /
+            `.to(dtype)`, swapping a submodule, rebuilding the flow. The old
+            compiled artifact is now stale; call `enable_inv_ladj()` again
+            to recompile against the new `self.t()`.
+
+        To make that refresh possible, this method is deliberately **not
+        idempotent**: every call rebuilds `F = self.t()` and recompiles (a
+        fresh `_inv_ladj_fn`). Each call pays the torch.compile cost, so
+        enable once after setup and re-call only when you reallocated
+        parameters.
+
+        Argument:
+            mode: passed through to torch.compile. The default
+                "reduce-overhead" captures a CUDA graph on the first
+                `.inv_ladj(x)` call (fastest for fixed-shape inputs). Pass
+                "default" if the batch shape varies between calls or GPU
+                memory is tight, or "max-autotune" for extra kernel tuning.
+        """
+        F = self.t() # rebuilt each call so re-enabling refreshes the capture
+        self._inv_ladj_fn = torch.compile(lambda x: F.inv.call_and_ladj(x), mode=mode)
+        return self
+
+    def inv_ladj(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        """Compiled inverse + Jacobian: returns ``self.t().inv.call_and_ladj(x)``.
+
+        Input:
+            x: Tensor [N, d]   points in the flow's codomain (output space)
+        Output:
+            x_pre: Tensor [N, d]   pre-images in the domain (input space)
+            ladj:  Tensor [N]      log|det J_{F^-1}(x)| (= -log|det J_F(x_pre)|)
+        Raises RuntimeError if .enable_inv_ladj() has not been called.
+        """
+        if self._inv_ladj_fn is None:
+            raise RuntimeError(
+                f"{type(self).__name__}.inv_ladj() requires .enable_inv_ladj() first."
+            )
+        return self._inv_ladj_fn(x)
 
 
 # ──────────────────────────────────────────────────────────────────────
