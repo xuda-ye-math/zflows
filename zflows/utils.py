@@ -2,7 +2,7 @@
 
 import torch
 from .flow import ComposedTransform
-from .potential import Potential
+from .potential import Potential, linear_combination
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -472,6 +472,92 @@ def langevin(samples: torch.Tensor, potential: Potential, beta: float = 1.0, ste
                 x = y
         out.append(x)
     return torch.cat(out, dim=0)
+
+def annealed_importance_sampling(samples: torch.Tensor, source: Potential, target: Potential, ladder: int = 1, step: float = 1e-3, iters: int = 100, chunk: int = 1) -> torch.Tensor:
+    """
+    Annealed importance sampling (an SMC sampler) that transports the input
+    particles from the `source` distribution exp(-source(x)) to the `target`
+    distribution exp(-target(x)) through a ladder of M = `ladder` linearly
+    interpolated bridge potentials, alternating importance reweighting (with
+    multinomial resampling) and Langevin rejuvenation at each rung.
+
+    The bridge at rung k is the convex combination
+        u_k(x) = (1 - k/M) * source(x) + (k/M) * target(x),   k = 0, ..., M,
+    so u_0 == source (the distribution `samples` is assumed to follow) and
+    u_M == target; the mix walks from source toward target as k grows.
+    Stored, per the project convention (see tests/4D_Boltzmann_generator.py),
+    as `linear_combination([target, source], [k/M, 1 - k/M])` and retuned in
+    place each rung via `set_coeffs`. (The inline `k/M * source + (1 - k/M) *
+    target` sketch in the original stub had source/target swapped relative to
+    the stated source -> target direction; the implementation follows the
+    direction the function name, docstring, and project convention agree on.)
+
+    For each k = 1, ..., M, starting from particles x ~ u_{k-1}:
+      1. Incremental self-normalised importance weights from u_{k-1} to u_k.
+         The proposal is the identity (no flow), so
+             log w(x) = u_{k-1}(x) - u_k(x) = (1/M) * (source(x) - target(x)),
+         exponentiated after subtracting the max for numerical stability
+         (same self-normalised convention as `importance_weights`).
+      2. Multinomial resampling of x by w (with replacement) — collapses the
+         particle set onto the regions u_k weights highly.
+      3. Langevin (ULA) rejuvenation targeting exp(-u_k) for `iters` steps,
+         spreading the resampled particles back out under the new bridge.
+    After the final rung the particles approximate exp(-target).
+
+    Like `langevin` / `hmc`, the per-rung move is the unadjusted Langevin
+    algorithm. Requires `source.enable_grad()` and `target.enable_grad()` so
+    the combined bridge `.grad(x)` closure routes into the children's
+    compiled fast paths; otherwise raises RuntimeError. The bridge energies
+    used for the weights go through the plain `__call__` forward, so
+    `enable_eval()` is not needed.
+
+    Input:
+        samples:  Tensor [N, d]   initial particles, assumed ~ exp(-source)
+        source:   Potential       source potential u_0 (must be enable_grad()'d)
+        target:   Potential       target potential u_M (must be enable_grad()'d)
+        ladder:   int             number of annealing rungs M (>= 1). M=1 is a
+                                  single reweight + resample + Langevin hop
+                                  straight from source to target; larger M
+                                  bridges low-overlap source/target pairs.
+        step:     float           Langevin (ULA) step size, shared across rungs
+        iters:    int             Langevin steps per rung
+        chunk:    int             split `samples` along dim 0 into this many
+                                  chunks inside each Langevin call to bound peak
+                                  VRAM (statistically equivalent to chunk=1).
+    Output:
+        samples:  Tensor [N, d]   particles after the full source -> target
+                                  anneal, approximating exp(-target).
+    """
+    if source._grad_fn is None or target._grad_fn is None:
+        missing = type(source).__name__ if source._grad_fn is None else type(target).__name__
+        raise RuntimeError(
+            f"annealed_importance_sampling() runs Langevin on the bridge "
+            f"potentials, which needs gradients on both source and target; "
+            f"call {missing}.enable_grad() before passing it in."
+        )
+    M = ladder
+    # Two bridge potentials retuned per rung via set_coeffs. The combined
+    # grad/eval closures are linked at linear_combination.__init__ and read
+    # `self.coeffs` fresh on every call, so set_coeffs is a pure coefficient
+    # update (no recompile). Convention: linear_combination([target, source],
+    # [c, 1 - c]) -> u = c * target + (1 - c) * source, with c = k/M in [0, 1].
+    u_prev = linear_combination([target, source])
+    u_curr = linear_combination([target, source])
+    x = samples
+    for k in range(1, M + 1):
+        c_prev = (k - 1) / M
+        c_curr = k / M
+        u_prev.set_coeffs([c_prev, 1.0 - c_prev]) # u_{k-1}
+        u_curr.set_coeffs([c_curr, 1.0 - c_curr]) # u_k
+        # (1) incremental IS weights from u_{k-1} to u_k on x ~ u_{k-1}
+        with torch.no_grad():
+            log_w = u_prev(x) - u_curr(x) # = (1/M) * (source(x) - target(x))
+            w = (log_w - log_w.max()).exp() # self-normalised, in [0, 1]
+        # (2) resample onto high-weight particles, then (3) Langevin-
+        #     rejuvenate against u_k to obtain fresh samples ~ exp(-u_k).
+        x = resample(x, w)
+        x = langevin(x, u_curr, step=step, iters=iters, chunk=chunk)
+    return x
 
 def stochastic_heun(samples: torch.Tensor, potential: Potential, beta: float = 1.0, step: float = 1e-3, iters: int = 100, chunk: int = 1) -> torch.Tensor:
     """

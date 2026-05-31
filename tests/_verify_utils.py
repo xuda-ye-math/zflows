@@ -21,6 +21,9 @@ into one banner-separated harness. Sections:
       inverse-temperature beta scaling, reduced discretization bias vs
       Euler-Maruyama (ULA) at matched step, enable_grad gating,
       chunk-equivalence.
+   F. Annealed importance sampling: low-overlap source -> target transport
+      (mean/std land on the target), enable_grad gating on both endpoints,
+      chunk-equivalence.
 """
 
 import math
@@ -31,7 +34,7 @@ from zflows.potential import Gaussian, Potential, potential_from
 from zflows.flow import NSF
 from zflows.utils import (
     hmc, langevin, stochastic_heun, lbfgs, optimization,
-    importance_weights, importance_weights_log,
+    importance_weights, importance_weights_log, annealed_importance_sampling,
     set_cache_size_limit, suppress_warnings,
 )
 
@@ -576,6 +579,86 @@ print(f"  max |mean(chunk=1) - mean(chunk=4)| = {mean_err:.4f}")
 print(f"  max |std (chunk=1) - std (chunk=4)| = {std_err:.4f}")
 # Different RNG consumption order -> different per-particle noise but the same
 # distribution; aggregate moments agree within MC error for N=8000.
+assert mean_err < 0.05, f"chunk moments diverged: mean err {mean_err}"
+assert std_err  < 0.05, f"chunk moments diverged: std err {std_err}"
+print("  [OK ] chunk produces statistically equivalent samples")
+
+
+# ══════════════════════════════════════════════════════════════════
+# F. Annealed importance sampling: source -> target transport
+# ══════════════════════════════════════════════════════════════════
+banner("F. annealed_importance_sampling: low-overlap source -> target")
+# source = N(0, I), target = N([3, 3], 0.5 I): the two clouds barely
+# overlap, so a single IS hop would collapse the ESS — exactly the regime
+# the annealing ladder is built for. After M reweight/resample/Langevin
+# rungs the particles should land on the target's mean and per-axis std.
+ais_source = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device).enable_grad()
+ais_target = Gaussian(mean=[3.0, 3.0], variance=[0.5, 0.5]).to(device).enable_grad()
+target_mean = [3.0, 3.0]
+target_std = math.sqrt(0.5) # ~0.7071 per axis
+
+# F.1 — the full ladder transports the cloud onto the target
+section("F.1  M-rung ladder lands on the target N([3, 3], 0.5 I)")
+torch.manual_seed(6)
+x_src = ais_source.samples(20000)
+src_mean = x_src.mean(0).tolist()
+xT = annealed_importance_sampling(
+    x_src, source=ais_source, target=ais_target,
+    ladder=20, step=5e-3, iters=30, chunk=2,
+)
+mean1 = xT.mean(0).tolist()
+std1 = xT.std(0).tolist()
+n_finite = torch.isfinite(xT).all(dim=-1).float().mean().item()
+print(f"  source mean = {[f'{v:+.3f}' for v in src_mean]}  (start ~ [0, 0])")
+print(f"   after mean = {[f'{v:+.3f}' for v in mean1]}  (target [3.000, 3.000])")
+print(f"   after std  = {[f'{v:.3f}' for v in std1]}  (target [{target_std:.3f}, {target_std:.3f}])")
+print(f"  fraction finite = {n_finite:.4f}")
+assert n_finite == 1.0, "AIS leaked non-finite particles"
+for v in mean1:
+    assert abs(v - 3.0) < 0.1, f"AIS mean off target: {mean1}"
+for v in std1:
+    assert abs(v - target_std) < 0.1, f"AIS std off target: {std1}"
+print("  [OK ] particles transported onto the target")
+
+# F.2 — both endpoints must be enable_grad()'d (Langevin runs on the bridge)
+section("F.2  annealed_importance_sampling() raises without enable_grad()")
+ais_src_raw = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device)
+ais_tgt_raw = Gaussian(mean=[3.0, 3.0], variance=[0.5, 0.5]).to(device)
+x0 = torch.randn(8, 2, device=device)
+# missing on the source
+raised_src = False
+try:
+    annealed_importance_sampling(x0, source=ais_src_raw, target=ais_target, ladder=4)
+except RuntimeError as e:
+    raised_src = True
+    print(f"  source not enabled -> raised: {e}")
+assert raised_src, "must raise when source lacks enable_grad()"
+# missing on the target
+raised_tgt = False
+try:
+    annealed_importance_sampling(x0, source=ais_source, target=ais_tgt_raw, ladder=4)
+except RuntimeError as e:
+    raised_tgt = True
+    print(f"  target not enabled -> raised: {e}")
+assert raised_tgt, "must raise when target lacks enable_grad()"
+print("  [OK ] both endpoints gated on enable_grad()")
+
+# F.3 — chunk statistically matches chunk=1 (aggregate moments)
+section("F.3  chunk statistically matches chunk=1 (aggregate moments)")
+torch.manual_seed(7)
+x_src = ais_source.samples(8000)
+torch.manual_seed(70)
+y1 = annealed_importance_sampling(x_src, source=ais_source, target=ais_target,
+                                  ladder=10, step=5e-3, iters=40, chunk=1)
+torch.manual_seed(70)
+y4 = annealed_importance_sampling(x_src, source=ais_source, target=ais_target,
+                                  ladder=10, step=5e-3, iters=40, chunk=4)
+mean_err = (y1.mean(0) - y4.mean(0)).abs().max().item()
+std_err  = (y1.std(0)  - y4.std(0) ).abs().max().item()
+print(f"  max |mean(chunk=1) - mean(chunk=4)| = {mean_err:.4f}")
+print(f"  max |std (chunk=1) - std (chunk=4)| = {std_err:.4f}")
+# Different RNG consumption order in the per-rung Langevin -> different
+# per-particle noise but the same distribution; moments agree to MC error.
 assert mean_err < 0.05, f"chunk moments diverged: mean err {mean_err}"
 assert std_err  < 0.05, f"chunk moments diverged: std err {std_err}"
 print("  [OK ] chunk produces statistically equivalent samples")
