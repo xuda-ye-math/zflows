@@ -21,9 +21,10 @@ into one banner-separated harness. Sections:
       inverse-temperature beta scaling, reduced discretization bias vs
       Euler-Maruyama (ULA) at matched step, enable_grad gating,
       chunk-equivalence.
-   F. Annealed importance sampling: low-overlap source -> target transport
-      (mean/std land on the target), enable_grad gating on both endpoints,
-      chunk-equivalence.
+   F. Annealed importance sampling (flow-proposal SMC): a trained NSF maps
+      source -> target, AIS lands the pushforward cloud tightly on the target
+      (mean/std), the ladder beats a single hop on a poor proposal, target
+      enable_grad gating (source needs none), chunk-equivalence.
 """
 
 import math
@@ -32,10 +33,11 @@ import torch
 
 from zflows.potential import Gaussian, Potential, potential_from
 from zflows.flow import NSF
+from zflows.loss import reverse_KL
 from zflows.utils import (
     hmc, langevin, stochastic_heun, lbfgs, optimization,
     importance_weights, importance_weights_log, annealed_importance_sampling,
-    set_cache_size_limit, suppress_warnings,
+    compute_ESS_log, set_cache_size_limit, suppress_warnings,
 )
 
 # Silence Triton autotune / Inductor / Dynamo / Python warnings; give Dynamo
@@ -585,31 +587,45 @@ print("  [OK ] chunk produces statistically equivalent samples")
 
 
 # ══════════════════════════════════════════════════════════════════
-# F. Annealed importance sampling: source -> target transport
+# F. Annealed importance sampling (flow-proposal SMC)
 # ══════════════════════════════════════════════════════════════════
-banner("F. annealed_importance_sampling: low-overlap source -> target")
-# source = N(0, I), target = N([3, 3], 0.5 I): the two clouds barely
-# overlap, so a single IS hop would collapse the ESS — exactly the regime
-# the annealing ladder is built for. After M reweight/resample/Langevin
-# rungs the particles should land on the target's mean and per-axis std.
-ais_source = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device).enable_grad()
+banner("F. annealed_importance_sampling: flow proposal F_# source -> target")
+# AIS now takes a trained flow F as the proposal and anneals along the
+# geometric path between F_# source and the target, refreshing x = F^{-1}(y)
+# for the importance weights and rejuvenating with Langevin in the target.
+# source = N(0, I), target = N([3, 3], 0.5 I); an NSF is reverse-KL trained so
+# that F_# source ~~ target, then AIS should land the cloud on the target.
+ais_source = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device)        # forward-only, no enable_grad
 ais_target = Gaussian(mean=[3.0, 3.0], variance=[0.5, 0.5]).to(device).enable_grad()
-target_mean = [3.0, 3.0]
 target_std = math.sqrt(0.5) # ~0.7071 per axis
 
-# F.1 — the full ladder transports the cloud onto the target
-section("F.1  M-rung ladder lands on the target N([3, 3], 0.5 I)")
 torch.manual_seed(6)
-x_src = ais_source.samples(20000)
-src_mean = x_src.mean(0).tolist()
-xT = annealed_importance_sampling(
-    x_src, source=ais_source, target=ais_target,
-    ladder=20, step=5e-3, iters=30, chunk=2,
+ais_flow = NSF(a=[-6.0, -6.0], b=[6.0, 6.0], bins=8, transforms=4,
+               hidden_features=(64, 64)).to(device)
+opt = torch.optim.Adam(ais_flow.parameters(), lr=2e-3)
+x_train = ais_source.samples(4000)
+for _ep in range(60):
+    for _s in range(0, 4000, 1000):
+        loss = reverse_KL(x_train[_s:_s + 1000], target=ais_target, F=ais_flow.t())
+        opt.zero_grad(); loss.backward(); opt.step()
+ais_F = ais_flow.t()
+with torch.no_grad():
+    ess_prop = compute_ESS_log(
+        importance_weights_log(ais_source.samples(8000), ais_source, ais_target, ais_F)
+    ).item()
+print(f"  trained proposal ESS (F_# source vs target) = {ess_prop:.3f}")
+
+# F.1 — the ladder lands the flow-pushforward cloud on the target
+section("F.1  AIS lands the pushforward cloud on the target N([3, 3], 0.5 I)")
+torch.manual_seed(61)
+x_src = ais_source.samples(8000)
+y = annealed_importance_sampling(
+    x_src, source=ais_source, target=ais_target, F=ais_F,
+    ladder=12, step=3e-3, iters=30, chunk=2,
 )
-mean1 = xT.mean(0).tolist()
-std1 = xT.std(0).tolist()
-n_finite = torch.isfinite(xT).all(dim=-1).float().mean().item()
-print(f"  source mean = {[f'{v:+.3f}' for v in src_mean]}  (start ~ [0, 0])")
+mean1 = y.mean(0).tolist()
+std1 = y.std(0).tolist()
+n_finite = torch.isfinite(y).all(dim=-1).float().mean().item()
 print(f"   after mean = {[f'{v:+.3f}' for v in mean1]}  (target [3.000, 3.000])")
 print(f"   after std  = {[f'{v:.3f}' for v in std1]}  (target [{target_std:.3f}, {target_std:.3f}])")
 print(f"  fraction finite = {n_finite:.4f}")
@@ -620,39 +636,52 @@ for v in std1:
     assert abs(v - target_std) < 0.1, f"AIS std off target: {std1}"
 print("  [OK ] particles transported onto the target")
 
-# F.2 — both endpoints must be enable_grad()'d (Langevin runs on the bridge)
-section("F.2  annealed_importance_sampling() raises without enable_grad()")
-ais_src_raw = Gaussian(mean=[0.0, 0.0], variance=[1.0, 1.0]).to(device)
-ais_tgt_raw = Gaussian(mean=[3.0, 3.0], variance=[0.5, 0.5]).to(device)
-x0 = torch.randn(8, 2, device=device)
-# missing on the source
-raised_src = False
-try:
-    annealed_importance_sampling(x0, source=ais_src_raw, target=ais_target, ladder=4)
-except RuntimeError as e:
-    raised_src = True
-    print(f"  source not enabled -> raised: {e}")
-assert raised_src, "must raise when source lacks enable_grad()"
-# missing on the target
+# F.2 — a poor proposal: the ladder beats a single hop (M>1 helps)
+section("F.2  ladder beats a single hop on a poor (identity) proposal")
+torch.manual_seed(62)
+bad_flow = NSF(a=[-6.0, -6.0], b=[6.0, 6.0], bins=8, transforms=4,
+               hidden_features=(32, 32)).to(device)
+bad_flow.zeros()                 # identity init: F_# source = source, far from target
+bad_F = bad_flow.t()
+x_src = ais_source.samples(6000)
+y_one = annealed_importance_sampling(x_src, ais_source, ais_target, bad_F,
+                                     ladder=1,  step=2e-3, iters=60, chunk=2)
+y_lad = annealed_importance_sampling(x_src, ais_source, ais_target, bad_F,
+                                     ladder=20, step=2e-3, iters=60, chunk=2)
+err_one = max(abs(v - 3.0) for v in y_one.mean(0).tolist())
+err_lad = max(abs(v - 3.0) for v in y_lad.mean(0).tolist())
+print(f"  M=1  mean = {[f'{v:.3f}' for v in y_one.mean(0).tolist()]}  |err| = {err_one:.3f}")
+print(f"  M=20 mean = {[f'{v:.3f}' for v in y_lad.mean(0).tolist()]}  |err| = {err_lad:.3f}")
+assert err_lad < err_one, "annealing ladder should beat a single hop on a poor proposal"
+print("  [OK ] the ladder closes the gap a single hop cannot")
+
+# F.3 — only the target needs enable_grad (Langevin runs in the target);
+#        the source is forward-only and needs none.
+section("F.3  target enable_grad gating; source needs none")
+tgt_raw = Gaussian(mean=[3.0, 3.0], variance=[0.5, 0.5]).to(device)
+x0 = ais_source.samples(64)
 raised_tgt = False
 try:
-    annealed_importance_sampling(x0, source=ais_source, target=ais_tgt_raw, ladder=4)
+    annealed_importance_sampling(x0, ais_source, tgt_raw, ais_F, ladder=4)
 except RuntimeError as e:
     raised_tgt = True
     print(f"  target not enabled -> raised: {e}")
 assert raised_tgt, "must raise when target lacks enable_grad()"
-print("  [OK ] both endpoints gated on enable_grad()")
+# source without enable_grad must be fine (only ever called forward)
+y_ok = annealed_importance_sampling(x0, ais_source, ais_target, ais_F, ladder=2, iters=10)
+assert torch.isfinite(y_ok).all(), "source needs no enable_grad; run must succeed"
+print("  [OK ] target gated on enable_grad(); raw source accepted")
 
-# F.3 — chunk statistically matches chunk=1 (aggregate moments)
-section("F.3  chunk statistically matches chunk=1 (aggregate moments)")
+# F.4 — chunk statistically matches chunk=1 (aggregate moments)
+section("F.4  chunk statistically matches chunk=1 (aggregate moments)")
 torch.manual_seed(7)
-x_src = ais_source.samples(8000)
+x_src = ais_source.samples(6000)
 torch.manual_seed(70)
-y1 = annealed_importance_sampling(x_src, source=ais_source, target=ais_target,
-                                  ladder=10, step=5e-3, iters=40, chunk=1)
+y1 = annealed_importance_sampling(x_src, ais_source, ais_target, ais_F,
+                                  ladder=10, step=3e-3, iters=40, chunk=1)
 torch.manual_seed(70)
-y4 = annealed_importance_sampling(x_src, source=ais_source, target=ais_target,
-                                  ladder=10, step=5e-3, iters=40, chunk=4)
+y4 = annealed_importance_sampling(x_src, ais_source, ais_target, ais_F,
+                                  ladder=10, step=3e-3, iters=40, chunk=4)
 mean_err = (y1.mean(0) - y4.mean(0)).abs().max().item()
 std_err  = (y1.std(0)  - y4.std(0) ).abs().max().item()
 print(f"  max |mean(chunk=1) - mean(chunk=4)| = {mean_err:.4f}")
