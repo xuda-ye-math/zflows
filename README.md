@@ -39,6 +39,16 @@ x_back = F.inv(y) # inverse
 
 Swapping flow classes is a one-line change. Every class also exposes `flow.zeros()` (initialise to the identity bijection) and a shared `randmask: bool = True` knob on `NSF` / `NCSF` / `RealNVP` (fresh `torch.randperm` per layer; set `False` for the legacy alternating mask). Per-class hyperparameters are documented in [`flow.py`](zflows/flow.py).
 
+The forward and inverse maps each have an opt-in `torch.compile` fast path. Capture `F = flow.t()` once, enable them, and call the compiled versions, which return the fused `(points, log|det J|)`:
+
+```python
+F = flow.t().enable_for_ladj().enable_inv_ladj()
+y, ladj     = F.for_ladj(x)   # == F.call_and_ladj(x),     compiled
+x_back, ilj = F.inv_ladj(y)   # == F.inv.call_and_ladj(y), compiled
+```
+
+This is a clean speedup (~3–20×, growing with dimension) when a map is the repeated, fixed-shape bottleneck — e.g. importance-sampling pushforwards. See [`compare_compiled_inverse.md`](tests/compare_compiled_inverse.md).
+
 **Unified `Potential` class.** Every energy function in `zflows` — built-in (`Gaussian`, `Uniform`, `Gaussian_Mixture`) or user-defined — subclasses one `Potential` base. Define a custom potential by subclassing `Potential` and implementing `forward(x)`:
 
 ```python
@@ -80,23 +90,14 @@ from zflows.potential import linear_combination
 u = linear_combination([u0, u1, ...], [c0, c1, ...])
 ```
 
-**Auto-compiled gradient feature.** Opt-in to a `torch.compile`-compiled `vmap(grad(u))` with a single chainable call on any `Potential` instance:
+Any `Potential` opts into two `torch.compile` fast paths with one chainable call: `.enable_grad()` gives a compiled gradient `u.grad(x)` (a vmapped `grad`, no `requires_grad_` on `x` needed), and `.enable_eval()` a compiled forward `u.eval(x)`. The closures are built once, cached on the instance, and reused every call, so heavy-load Langevin / MALA / HMC sampling runs one fused kernel per step:
 
 ```python
 u = My_Potential().to(device).enable_grad()
-g = u.grad(x) # x: [N, d] -> g: [N, d], no requires_grad_ on x needed
+g = u.grad(x)   # x: [N, d] -> g: [N, d]
 ```
 
-The gradient closure is built once, cached on the instance, and reused every call — making heavy-load Langevin / MALA sampling fast (one fused kernel per step instead of an autograd graph rebuild). The call is idempotent and chainable; calling `.grad()` without `.enable_grad()` raises a clear `RuntimeError`.
-
-`linear_combination` inherits this automatically: enable `.grad(x)` on the constituent potential instances `u0` and `u1`, and the `linear_combination` built from them inherits that fast path through a Python closure $\sum_k c_k\, \nabla U_k(x)$ linked at construction. No `u.enable_grad()` call on the combination is needed:
-
-```python
-u0 = Gaussian(...).enable_grad()       # instance, not class
-u1 = My_Potential(...).enable_grad()    # instance, not class
-
-u = linear_combination([u0, u1], [0.2, 0.8])   # instance; u.grad(x) works immediately
-```
+A `linear_combination` inherits the fast path automatically from its enabled children — no `.enable_grad()` on the combination itself.
 
 **One-line compilable KL losses.** `reverse_KL(x, target, F)` and `forward_KL(y, source, F)` are direct-call functions returning a scalar loss. For heavy-load training (e.g. annealed Boltzmann generators with thousands of steps per bridge) wrap the loss once with `loss_compile(...)` to capture `(potential, transform)` as closure constants and fuse the forward into a CUDA graph — typically **4–10× faster per training step** ([benchmark](tests/compare_compiled_loss.md)):
 
@@ -160,6 +161,8 @@ zflows
 ├── potential.py
 └── utils.py
 ```
+
+**One consistent interface, compiled or not.** However many features the list above adds, the goal stays singular: the same interface whether or not you opt into `torch.compile`. Every compiled fast path — `enable_grad` / `enable_eval`, `enable_for_ladj` / `enable_inv_ladj`, `loss_compile` — is an opt-in accelerator that returns exactly what its plain counterpart returns; drop the `enable_*` / `loss_compile` calls and the *identical* code still runs, just slower. It stays idiomatic PyTorch end to end — no new DSL, no second framework to get familiar with.
 
 ## Installation
 
@@ -376,7 +379,44 @@ python -m tests.2D_forward_KL
 </details>
 
 <details open>
-<summary><strong>3. Compiled vs. raw loss benchmark</strong></summary>
+<summary><strong>3. Compiled vs. raw forward/inverse map benchmark</strong></summary>
+
+[`tests/compare_compiled_inverse.py`](tests/compare_compiled_inverse.py) (writeup: [`tests/compare_compiled_inverse.md`](tests/compare_compiled_inverse.md)) benchmarks the compiled `ComposedTransform` fast paths — `F.for_ladj(x)` (compiled `call_and_ladj`) and `F.inv_ladj(y)` (compiled `inv.call_and_ladj`), each returning the fused `(points, log|det J|)` — against the raw `flow.t().call_and_ladj(x)` / `flow.t().inv.call_and_ladj(y)` pattern, across an `NSF` `dimension × hidden_features` grid. The eager maps are host-overhead-bound at small `d`, so compiling them is a clean win.
+
+```bash
+python -m tests.compare_compiled_inverse
+```
+
+Result on an RTX 5070 Ti (committed [`tests/compare_compiled_inverse.csv`](tests/compare_compiled_inverse.csv)). The `fwd` columns are the forward map `flow.t().call_and_ladj(x)`; the `inv` columns are the inverse map `flow.t().inv.call_and_ladj(y)`. Within each, the three timing columns are the **mean ms per call** (over 50 calls) in three modes — `raw` (no compile, fresh `flow.t()` each call), `def` (compiled `F.for_ladj`/`F.inv_ladj` with `mode='default'`), and `red` (compiled with `mode='reduce-overhead'`, CUDA Graphs) — and the two `↑` columns are the resulting speedups over `raw`: `↑def` = `raw / def`, `↑red` = `raw / red`. So a row reads: forward map costs `fwd raw` ms uncompiled and `fwd def`/`fwd red` ms compiled, a `fwd ↑def`/`fwd ↑red`× speedup; likewise for the inverse map.
+
+<div align="center">
+
+| $d$ | hidden_features | fwd raw | fwd def | fwd red | fwd ↑def | fwd ↑red | inv raw | inv def | inv red | inv ↑def | inv ↑red |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+|  2 | (64, 64)   |  1.573 | 0.328 | 0.235 |  4.80 |  6.69 |   4.291 |  0.685 |  0.582 |  6.26 |  7.37 |
+|  2 | (128, 128) |  1.602 | 0.309 | 0.308 |  5.18 |  5.20 |   4.260 |  0.780 |  0.792 |  5.46 |  5.38 |
+|  2 | (256, 256) |  1.579 | 0.419 | 0.415 |  3.77 |  3.80 |   4.282 |  1.184 |  1.131 |  3.62 |  3.79 |
+|  4 | (64, 64)   |  1.625 | 0.342 | 0.247 |  4.75 |  6.59 |   7.117 |  1.130 |  1.100 |  6.30 |  6.47 |
+|  4 | (128, 128) |  1.611 | 0.331 | 0.329 |  4.87 |  4.89 |   7.059 |  1.457 |  1.439 |  4.84 |  4.90 |
+|  4 | (256, 256) |  1.610 | 0.509 | 0.504 |  3.16 |  3.19 |   7.270 |  2.420 |  2.347 |  3.00 |  3.10 |
+|  8 | (64, 64)   |  3.845 | 0.333 | 0.331 | 11.54 | 11.63 |  32.991 |  2.695 |  2.605 | 12.24 | 12.67 |
+|  8 | (128, 128) |  3.975 | 0.484 | 0.435 |  8.22 |  9.14 |  34.049 |  3.715 |  3.569 |  9.17 |  9.54 |
+|  8 | (256, 256) |  4.163 | 0.598 | 0.599 |  6.97 |  6.95 |  35.522 |  5.132 |  5.113 |  6.92 |  6.95 |
+| 16 | (64, 64)   |  6.523 | 0.428 | 0.427 | 15.25 | 15.29 | 107.037 |  6.884 |  6.679 | 15.55 | 16.03 |
+| 16 | (128, 128) |  6.561 | 0.513 | 0.512 | 12.79 | 12.81 | 108.207 |  8.285 |  8.035 | 13.06 | 13.47 |
+| 16 | (256, 256) |  6.803 | 0.756 | 0.759 |  9.00 |  8.96 | 111.941 | 12.130 | 11.859 |  9.23 |  9.44 |
+| 32 | (64, 64)   | 11.847 | 0.600 | 0.607 | 19.73 | 19.53 | 384.586 | 19.143 | 18.701 | 20.09 | 20.57 |
+| 32 | (128, 128) | 12.053 | 0.771 | 0.772 | 15.62 | 15.61 | 390.656 | 24.547 | 24.225 | 15.91 | 16.13 |
+| 32 | (256, 256) | 12.404 | 1.116 | 1.113 | 11.11 | 11.15 | 402.105 | 35.689 | 35.321 | 11.27 | 11.38 |
+
+</div>
+
+The speedup *grows with `d`*: the forward sees ~3–20× and the inverse spline bisection ~3–21×, largest at $d = 32$ where the raw inverse (~385–402 ms — sequential per-coordinate bisection) collapses to ~19–35 ms. The two compile modes are within noise here (no backward / optimizer, so there is little extra launch overhead for CUDA Graphs to remove). See the [writeup](tests/compare_compiled_inverse.md) for methodology and the re-enable rules.
+
+</details>
+
+<details open>
+<summary><strong>4. Compiled vs. raw loss benchmark</strong></summary>
 
 [`tests/compare_compiled_loss.py`](tests/compare_compiled_loss.py) (writeup: [`tests/compare_compiled_loss.md`](tests/compare_compiled_loss.md)) sweeps `NSF` across a `dimension × hidden_features` grid and times the *full* training step (forward + `backward()` + `Adam.step()`) in three modes: raw `reverse_KL(x, target, flow.t())`, `loss_compile(...)` with `mode='default'`, and with `mode='reduce-overhead'` (CUDA Graphs). The captured-once trick — pass `F = flow.t()` as a closure constant so Dynamo sees a stable object identity across iterations — turns what looks like a Python-overhead-bound workload at small `dimension` into a fused CUDA-graph replay.
 
@@ -413,7 +453,7 @@ The raw baseline starts rising at $d \ge 16$ — by $d = 32$ it has roughly doub
 </details>
 
 <details open>
-<summary><strong>4. Periodic target with rejuvenation</strong></summary>
+<summary><strong>5. Periodic target with rejuvenation</strong></summary>
 
 [`tests/3D_periodic.py`](tests/3D_periodic.py) (writeup: [`tests/3D_periodic.md`](tests/3D_periodic.md)) trains an `NCSF` on a von-Mises ridge mixture on the 3-torus $[-\pi, \pi]^3$, then runs the full pipeline: importance sampling → resample → `enable_grad` → Langevin rejuvenation.
 
@@ -426,7 +466,7 @@ python -m tests.3D_periodic
 </details>
 
 <details open>
-<summary><strong>5. Annealed Boltzmann generator (4D, two repelling charges)</strong></summary>
+<summary><strong>6. Annealed Boltzmann generator (4D, two repelling charges)</strong></summary>
 
 [`tests/4D_Boltzmann_generator.py`](tests/4D_Boltzmann_generator.py) (writeup: [`tests/4D_Boltzmann_generator.md`](tests/4D_Boltzmann_generator.md)) trains an `NSF` on the 4D target of two charges in $\mathbb R^2$ confined to a soft annulus and repelling via a regularized 3D Coulomb. A direct flow proposal would have $\mathrm{ESS} \approx 0$, so we anneal: chain `.enable_grad()` on **each constituent potential** ($u_{\mathrm{source}}$ and $u_{\mathrm{target}}$) at the very top of the script, build two `linear_combination` bridge potentials *once* (the IS denominator $U_{k-1}$ and the training / IS-numerator / MALA target $U_k$ — both auto-inherit the compiled gradient fast path through their `__init__`-linked closures), and retune coefficients per rung via plain `set_coeffs([c, 1-c])`. The children's compiled `.grad` is paid for **exactly once** at construction time and reused unchanged across all $M{=}12$ rungs. A single hoisted `loss_compile(reverse_KL, u_curr, F)` handles the per-rung reverse-KL training without per-rung re-instantiation. Each rung runs *resample → reverse KL train → IS → resample → MALA rejuvenation*, with the same flow warm-started across rungs. ESS climbs from $0.68$ at $k=1$ straight to a $0.96$–$0.97$ plateau by $k=2$ and stays there for the remaining ten rungs. The figure shows the marginal annulus forming (top row) and the joint relative-angle distribution $\Delta\theta = \theta_2 - \theta_1$ on $S^1$ shifting from uniform at $k=0$ to peaked at $\pm\pi$ at $k=12$ — the antipodal Coulomb minimum.
 
@@ -439,7 +479,7 @@ python -m tests.4D_Boltzmann_generator
 </details>
 
 <details open>
-<summary><strong>6. Continuous normalizing flow on two moons (CNF / FFJORD)</strong></summary>
+<summary><strong>7. Continuous normalizing flow on two moons (CNF / FFJORD)</strong></summary>
 
 [`tests/2D_two_moon_CNF.py`](tests/2D_two_moon_CNF.py) (writeup: [`tests/2D_two_moon_CNF.md`](tests/2D_two_moon_CNF.md)) trains a `CNF` (FFJORD-style continuous normalizing flow) by forward KL on samples from the classic two-moons distribution — a target whose interlocking-arc topology cannot be separated along any axis. The point of this test is to (i) exercise the `CNF` class on a target where its smooth, non-axis-aligned deformation actually pays off, and (ii) make the CNF/NSF trade-off concrete: closed-form O(d) splines vs. an adaptive ODE flow that buys topological flexibility at the cost of 50–500× slower importance sampling. The writeup includes a side-by-side comparison of the two flow classes across the operations a typical energy-based pipeline performs.
 
@@ -452,7 +492,7 @@ python -m tests.2D_two_moon_CNF
 </details>
 
 <details open>
-<summary><strong>7. RealNVP latent-space interpolation</strong></summary>
+<summary><strong>8. RealNVP latent-space interpolation</strong></summary>
 
 [`tests/2D_RealNVP_latent_interpolation.py`](tests/2D_RealNVP_latent_interpolation.py) (writeup: [`tests/2D_RealNVP_latent_interpolation.md`](tests/2D_RealNVP_latent_interpolation.md)) trains a `RealNVP` by forward KL on a 4-corner Gaussian mixture, then exercises the bijection in the *inverse* direction: pull each mode center back to the latent space via $z = F^{-1}(x)$, draw straight lines between latent anchors, and decode them with $F$. The decoded curves bend through the data manifold rather than cutting straight across the gaps — the canonical RealNVP morphing demo from Dinh et al. (2016), reduced to 2D so the latent and data spaces are both visible. This is the only test in the folder that puts $F^{-1}$ in the foreground, and the script runs end-to-end only because RealNVP's inverse and log-determinant are *closed-form* and $O(d)$ — repeating it with NSF (bisection inverse) or CNF (adaptive ODE) would be visibly slower.
 
@@ -465,7 +505,7 @@ python -m tests.2D_RealNVP_latent_interpolation
 </details>
 
 <details open>
-<summary><strong>8. CNF vs. OTFlow on a multi-well target across dimension</strong></summary>
+<summary><strong>9. CNF vs. OTFlow on a multi-well target across dimension</strong></summary>
 
 [`tests/multi_well_compare.py`](tests/multi_well_compare.py) (writeup: [`tests/multi_well_compare.md`](tests/multi_well_compare.md)) pits `CNF` against `OTFlow` on the **same** 8-mode target — the first 3 coordinates are symmetric double wells ($2^3 = 8$ modes), the rest standard Gaussian — trained by the **same** plain `reverse_KL` (OTFlow's OT regularizers switched off), warm-started at the identity, with the same fixed-step RK4 budget. It isolates the one variable that differs, the velocity-field architecture, and reports the importance-sampling $\mathrm{ESS}$ of the trained proposal as the dimension grows. The wells are kept shallow so mode-seeking reverse KL must cover all 8 modes rather than collapse onto a subset.
 
