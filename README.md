@@ -164,6 +164,8 @@ zflows
 
 **One consistent interface, compiled or not.** However many features the list above adds, the goal stays singular: the same interface whether or not you opt into `torch.compile`. Every compiled fast path — `enable_grad` / `enable_eval`, `enable_for_ladj` / `enable_inv_ladj`, `loss_compile` — is an opt-in accelerator that returns exactly what its plain counterpart returns; drop the `enable_*` / `loss_compile` calls and the *identical* code still runs, just slower. It stays idiomatic PyTorch end to end — no new DSL, no second framework to get familiar with.
 
+> ⚠️ The compiled fast paths are not a free lunch. At high dimensions with large conditioners (e.g. `d = 256`, `hidden_features = (256, 256)`), `torch.compile`-ing the `NSF` `for_ladj` / `inv_ladj` maps is known to be **extremely** slow to compile — the spline-bisection graph blows up and there is no effective way around it. In such cases just drop the `enable_*` calls and fall back to the plain `flow.t().call_and_ladj` / `flow.t().inv.call_and_ladj` — the result is identical, only the one-time compile cost disappears.
+
 ## Installation
 
 `zflows` is pure Python; the only runtime dependency is [`torch`](https://pytorch.org), resolved automatically by `pip` (`numpy` is pulled in transitively).
@@ -558,6 +560,17 @@ True
 It runs three checks: (1) OS is Linux — non-Linux emits a warning but doesn't fail; (2) `nvcc` is reachable — `shutil.which("nvcc")` first, then the Ubuntu default install locations `/usr/local/cuda/bin/nvcc` and `/usr/local/cuda-*/bin/nvcc` as fallbacks; warns if none match; (3) **the authoritative step**: actually `torch.compile`'s a small probe function under the same `mode='reduce-overhead'` zflows uses internally, and returns `True` iff that succeeds.
 
 The first two checks are warnings only; the bool return value reflects only the sanity test. Failure on (2) is the most common cause of the "C compiler not found" / "`nvcc` not found" errors that surface on the first call to `Potential.enable_grad` / `loss_compile` / `loss_compile_beta`: `torch.compile` invokes Triton / TorchInductor, which JIT-compiles a small CUDA helper at first call, and that step needs the NVIDIA C/C++ compiler `nvcc` from the **CUDA Toolkit** (not just the CUDA runtime that ships with the PyTorch wheel). Install the toolkit through your distro's package manager or from [NVIDIA's downloads page](https://developer.nvidia.com/cuda-downloads); if the toolkit lives at the Ubuntu default `/usr/local/cuda/bin/nvcc` or `/usr/local/cuda-X.Y/bin/nvcc` the fallback picks it up automatically, otherwise add it to `$PATH` and re-run `check_compile_available()`.
+
+</details>
+
+<details>
+<summary><strong>Q: Why is <code>torch.compile</code> so slow — the first call hangs for ages, especially the flow inverse?</strong></summary>
+
+That wait is **compile time**, paid once, not per-step runtime. The first call to any compiled path (`Potential.enable_grad` / `enable_eval`, `ComposedTransform.enable_for_ladj` / `enable_inv_ladj`, `loss_compile`) triggers Dynamo tracing → TorchInductor lowering → Triton kernel codegen (+ autotuning under `mode='reduce-overhead'`). For a training run with thousands of steps this amortizes within the first epoch; for a 10-step toy script it is net-negative, so just skip the `enable_*` calls there.
+
+The pathological case is the **`NSF` / `NCSF` inverse** (`enable_inv_ladj`): the spline bisection unrolls into a very large graph, and the compile time grows sharply with dimension and conditioner width — at something like `d = 256`, `hidden_features = (256, 256)` it can be **extremely** slow to compile, and there is no effective way around it (the forward map and the closed-form/ODE inverses of `RealNVP` / `CNF` / `OTFlow` compile fine). If you hit this, the fix is simply to **not compile that map**: drop the `enable_inv_ladj` / `enable_for_ladj` call and use the plain `flow.t().inv.call_and_ladj(y)` / `flow.t().call_and_ladj(x)` — the result is identical, only the one-time compile cost disappears.
+
+Things that help the rest of the time: prefer `mode='default'` (no CUDA-Graph capture or kernel autotuning — much faster to compile, ~10–30% slower at steady state) when compile time matters more than peak throughput; keep a stable batch shape so you don't pay repeated retraces (`set_cache_size_limit(64)` if you legitimately sweep many shapes/closures); and call `suppress_warnings()` before the first compile so the long wait isn't also buried in Triton/Inductor log noise.
 
 </details>
 
