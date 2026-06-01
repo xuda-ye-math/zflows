@@ -216,18 +216,17 @@ class Linear_Combination(Potential):
     beta * potential.grad(x)` pattern in `langevin` / `hmc` — no
     `.clone()` is needed.
 
-    **Do NOT nest linear_combinations.** Using a `Linear_Combination`
-    instance as a *child* of another `Linear_Combination` (i.e. a
-    linear combination of linear combinations) is **untested and not
-    recommended**. The combined `_grad_fn` / `_eval_fn` closures and
-    the device-consistency check are designed for a single flat layer
-    of children; the nested case has not been exercised and may
-    interact badly with the buffer-aliasing assumption above (every
-    child's compiled `.grad(x)` returning a static reduce-overhead
-    buffer that is consumed before the next compiled child runs).
-    Instead, list every constituent potential in one call and combine
-    them with a single flat `linear_combination([u_0, u_1, ..., u_N],
-    [c_0, c_1, ..., c_N])`.
+    **Nesting is supported.** A `Linear_Combination` may be used as a
+    *child* of another (a linear combination of linear combinations):
+    the combined `_grad_fn` / `_eval_fn` closures compose recursively
+    (`c * child.grad(x)` invokes the child's own combined closure), and
+    the fresh-allocation buffer-aliasing safety above holds at every
+    level. `enable_grad()` / `enable_eval()` therefore cascade to all
+    leaves, and `.grad` / `.eval` are correct at any depth and under
+    both `mode='default'` and `mode='reduce-overhead'` (verified in
+    `tests/_verify_nested.py`). A single flat
+    `linear_combination([u_0, ..., u_N], [c_0, ..., c_N])` is still the
+    simplest form when a flat list is all you need.
 
     If you prefer plain Python callables over `Potential` objects, you can
     skip this class entirely: define `lambda x: sum(c_k * U_k(x) for ...)`
@@ -398,12 +397,11 @@ def linear_combination(
     itself (e.g. `isinstance(u, Linear_Combination)` checks or to
     subclass).
 
-    Note: do NOT nest linear_combinations (passing a `Linear_Combination`
-    instance as one of `potentials`). That case is untested and not
-    recommended — list every constituent potential up front and combine
-    them with a single flat `linear_combination([u_0, ..., u_N],
-    [c_0, ..., c_N])` instead. See `Linear_Combination`'s class
-    docstring for the buffer-aliasing rationale.
+    Note: nesting is supported -- a `linear_combination` may itself be
+    passed as one of `potentials` (the combined grad/eval closures
+    compose recursively; see `Linear_Combination`'s class docstring and
+    `tests/_verify_nested.py`). A single flat `linear_combination([u_0,
+    ..., u_N], [c_0, ..., c_N])` remains the simplest form for a flat list.
     """
     return Linear_Combination(potentials, coeffs)
 

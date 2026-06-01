@@ -2,7 +2,7 @@
 
 import torch
 from .flow import ComposedTransform
-from .potential import Potential
+from .potential import Potential, linear_combination
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -431,6 +431,10 @@ def lbfgs(samples: torch.Tensor, potential: Potential, step: float = 1.0, iters:
     return torch.cat(out, dim=0)
 
 
+# alias: L-BFGS is the default mode-finder / MAP-refinement routine in zflows
+optimization = lbfgs
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Langevin — overdamped Langevin / MALA / tamed variants
 # ──────────────────────────────────────────────────────────────────────
@@ -529,6 +533,110 @@ def langevin(samples: torch.Tensor, potential: Potential, beta: float = 1.0, ste
                 x = y
         out.append(x)
     return torch.cat(out, dim=0)
+
+# alias: in SMC literature, Langevin steps are the standard "rejuvenation" move
+rejuvenation = langevin
+
+def sequential_monte_carlo(samples: torch.Tensor, source: Potential, target: Potential, beta_source: float = 1.0, beta_target: float = 1.0, ladder: int = 1, step: float = 1e-3, iters: int = 100, chunk: int = 1) -> tuple[torch.Tensor, list[float]]:
+    """
+    Sequential Monte Carlo (annealed Langevin) that transports the input
+    particles from the source `mu_0 ~ exp(-beta_source * source)` to the target
+    `mu_1 ~ exp(-beta_target * target)` (both on the SAME space, no flow) through
+    a ladder of M = `ladder` linearly-interpolated bridge potentials, alternating
+    importance reweighting (with multinomial resampling) and Langevin
+    rejuvenation **on each bridge** at every rung.
+
+    The bridge at rung k is the linear combination
+        u_k(x) = (1 - k/M) * beta_source * source(x) + (k/M) * beta_target * target(x),
+        k = 0, ..., M,
+    so u_0 = beta_source * source (the distribution `samples` follow) and
+    u_M = beta_target * target. Built via `linear_combination([target, source],
+    [c_k * beta_target, (1 - c_k) * beta_source])` (c_k = k/M) and retuned in
+    place each rung with `set_coeffs`.
+
+    For each k = 1, ..., M, starting from particles x ~ exp(-u_{k-1}):
+      1. Incremental self-normalised importance weights from u_{k-1} to u_k:
+             log w(x) = u_{k-1}(x) - u_k(x)
+                      = (1/M) * (beta_source * source(x) - beta_target * target(x)),
+         exponentiated after subtracting the max for numerical stability.
+      2. Multinomial resampling of x by w.
+      3. Langevin (ULA) rejuvenation targeting exp(-u_k) -- i.e. ON THE BRIDGE
+         POTENTIAL u_k itself -- for `iters` steps.
+    After the final rung the particles approximate exp(-beta_target * target).
+
+    Contrast with `annealed_importance_sampling_F` / `_G`, which use a trained
+    flow as the proposal and rejuvenate only in the final target `mu_1`: here
+    there is no flow, the bridge is built directly in potential space, and
+    Langevin runs on each intermediate `u_k`.
+
+    Requires `source.enable_grad()` and `target.enable_grad()` so the combined
+    bridge `.grad(x)` closure routes into the children's compiled fast paths;
+    otherwise raises RuntimeError. The per-rung weight evaluates `source` /
+    `target` through their compiled `.eval(x)` fast path when `.enable_eval()`
+    has been called (same opt-in as `langevin` / `hmc`), else the plain `__call__`.
+
+    Input:
+        samples:     Tensor [N, d]      particles drawn from exp(-beta_source * source)
+        source:      Potential          source potential (must be enable_grad()'d)
+        target:      Potential          target potential (must be enable_grad()'d)
+        beta_source: float              inverse temperature of the source (default 1.0)
+        beta_target: float              inverse temperature of the target (default 1.0)
+        ladder:      int                number of annealing rungs M (>= 1). M=1 is a
+                                        single reweight + resample + Langevin hop
+                                        straight from source to target; larger M
+                                        bridges low-overlap source/target pairs.
+        step:        float              Langevin (ULA) step size, shared across rungs
+        iters:       int                Langevin steps per rung
+        chunk:       int                split along dim 0 into this many chunks inside
+                                        each Langevin call to bound peak VRAM
+                                        (statistically equivalent to chunk=1).
+    Output:
+        samples:     Tensor [N, d]      particles approximating exp(-beta_target * target).
+        ess:         list[float]        length-M list of the per-rung effective sample size
+                                        (in [0, 1]) of the incremental importance weights at
+                                        each of the M ladder steps, computed *before*
+                                        resampling -- a diagnostic of how well consecutive
+                                        bridges overlap (close to 1 = well-spaced ladder).
+    """
+    if source._grad_fn is None or target._grad_fn is None:
+        missing = type(source).__name__ if source._grad_fn is None else type(target).__name__
+        raise RuntimeError(
+            f"sequential_monte_carlo() runs Langevin on the bridge potentials, "
+            f"which needs gradients on both source and target; call "
+            f"{missing}.enable_grad() before passing it in."
+        )
+    M = ladder
+    # Energy reweighting uses the compiled `.eval` fast path when the potentials
+    # have it (same opt-in as langevin / hmc), else the raw __call__. Safe under
+    # reduce-overhead: each `beta * <eval>` allocates a fresh tensor before the
+    # next `.eval` overwrites its static buffer.
+    t_eval = target.eval if target._eval_fn is not None else target
+    s_eval = source.eval if source._eval_fn is not None else source
+    # The bridge u_k is built once and retuned per rung via set_coeffs (pure
+    # coefficient update; its combined `.grad` closure, linked at
+    # linear_combination.__init__, reads self.coeffs fresh on every call), then
+    # used as the Langevin rejuvenation target. Convention:
+    #   linear_combination([target, source], [c*beta_target, (1-c)*beta_source])
+    #   -> u_k = c*beta_target*target + (1-c)*beta_source*source, c = k/M in [0, 1].
+    u_curr = linear_combination([target, source])
+    x = samples
+    ess = [] # per-rung effective sample size of the incremental weights
+    for k in range(1, M + 1):
+        c_curr = k / M
+        u_curr.set_coeffs([c_curr * beta_target, (1.0 - c_curr) * beta_source]) # u_k
+        # (1) incremental IS weights from u_{k-1} to u_k on x ~ exp(-u_{k-1}). The
+        #     bridge difference u_{k-1}(x) - u_k(x) telescopes (for every k) to
+        #     (1/M)*(beta_source*source(x) - beta_target*target(x)), so it is read
+        #     straight off the potentials' `.eval` fast path.
+        with torch.no_grad():
+            log_w = (beta_source * s_eval(x) - beta_target * t_eval(x)) / M # = u_{k-1}(x) - u_k(x)
+            ess.append(compute_ESS_log(log_w).item()) # ESS of this rung's weights (pre-resample)
+            w = (log_w - log_w.max()).exp() # self-normalised, in [0, 1]
+        # (2) resample onto high-weight particles, then (3) Langevin-rejuvenate
+        #     ON the bridge u_k to obtain fresh samples ~ exp(-u_k).
+        x = resample(x, w)
+        x = langevin(x, u_curr, step=step, iters=iters, chunk=chunk)
+    return x, ess
 
 def annealed_importance_sampling_F(samples: torch.Tensor, source: Potential, target: Potential, F: ComposedTransform, beta_source: float = 1.0, beta_target: float = 1.0, ladder: int = 1, step: float = 1e-3, iters: int = 100, chunk: int = 1) -> torch.Tensor:
     """
@@ -843,7 +951,7 @@ def stochastic_heun(samples: torch.Tensor, potential: Potential, beta: float = 1
 # HMC — Hamiltonian Monte Carlo with leapfrog + MH gate
 # ──────────────────────────────────────────────────────────────────────
 
-def hmc(samples: torch.Tensor, potential: Potential, beta: float = 1.0, step: float = 1e-2, iters: int = 10, burns: int = 10, chunk: int = 1) -> torch.Tensor:
+def hamiltonian_monte_carlo(samples: torch.Tensor, potential: Potential, beta: float = 1.0, step: float = 1e-2, iters: int = 10, burns: int = 10, chunk: int = 1) -> torch.Tensor:
     """
     Hamiltonian Monte Carlo (HMC) targeting the tempered distribution
     exp(-beta * U(x)).
@@ -920,7 +1028,7 @@ def hmc(samples: torch.Tensor, potential: Potential, beta: float = 1.0, step: fl
     """
     if potential._grad_fn is None:
         raise RuntimeError(
-            f"hmc() requires gradients on the potential; "
+            f"hamiltonian_monte_carlo() requires gradients on the potential; "
             f"call {type(potential).__name__}.enable_grad() before passing it in."
         )
     # MH accept/reject needs U(x_start), U(x_end); use the compiled fast
@@ -971,12 +1079,8 @@ def hmc(samples: torch.Tensor, potential: Potential, beta: float = 1.0, step: fl
         out.append(x)
     return torch.cat(out, dim=0)
 
-
-# alias: L-BFGS is the default mode-finder / MAP-refinement routine in zflows
-optimization = lbfgs
-
-# alias: in SMC literature, Langevin steps are the standard "rejuvenation" move
-rejuvenation = langevin
+# alias: HMC is the standard short name for Hamiltonian Monte Carlo
+hmc = hamiltonian_monte_carlo
 
 
 # ──────────────────────────────────────────────────────────────────────
