@@ -162,6 +162,8 @@ zflows
 └── utils.py
 ```
 
+For a full package tree structure, view [TREE.md](TREE.md).
+
 **One consistent interface, compiled or not.** However many features the list above adds, the goal stays singular: the same interface whether or not you opt into `torch.compile`. Every compiled fast path — `enable_grad` / `enable_eval`, `enable_for_ladj` / `enable_inv_ladj`, `loss_compile` — is an opt-in accelerator that returns exactly what its plain counterpart returns; drop the `enable_*` / `loss_compile` calls and the *identical* code still runs, just slower. It stays idiomatic PyTorch end to end — no new DSL, no second framework to get familiar with.
 
 > ⚠️ The compiled fast paths are not a free lunch. At high dimensions with large conditioners (e.g. `d = 256`, `hidden_features = (256, 256)`), `torch.compile`-ing the `NSF` `for_ladj` / `inv_ladj` maps is known to be **extremely** slow to compile — the spline-bisection graph blows up and there is no effective way around it. In such cases just drop the `enable_*` calls and fall back to the plain `flow.t().call_and_ladj` / `flow.t().inv.call_and_ladj` — the result is identical, only the one-time compile cost disappears. This caveat is specific to the flow's `for_ladj` / `inv_ladj` maps; `Potential.enable_grad` / `enable_eval` compile cheaply (a small `vmap(grad)` / forward graph) and are safe to leave on by default.
