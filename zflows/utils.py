@@ -247,16 +247,18 @@ importance_weights = importance_weights_F
 # Resample — multinomial resampling with replacement
 # ──────────────────────────────────────────────────────────────────────
 
-def resample(samples: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+def resample(samples: torch.Tensor, weights: torch.Tensor, N: int | None = None) -> torch.Tensor:
     """
     Multinomial resampling from weighted distribution with replacement
     Input:
-        samples: Tensor [N, d]
-        weights: Tensor [N]   (non-negative, not required to be normalized)
+        samples: Tensor [M, d]
+        weights: Tensor [M]   (non-negative, not required to be normalized)
+        N: number of independent samples to return; defaults to samples.shape[0]
     Output:
         resampled: Tensor [N, d]
     """
-    N = samples.shape[0]
+    if N is None:
+        N = samples.shape[0]
     probs = weights / weights.sum()
     idx = torch.multinomial(probs, N, replacement=True)
     return samples[idx]
