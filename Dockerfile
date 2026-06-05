@@ -10,7 +10,7 @@
 #   docker run --rm -it --gpus all -v "$PWD:/workspace" xudayemath/zflows:cu13
 # python REPL
 #   docker run --rm -it --gpus all xudayemath/zflows:cu13 python
-FROM nvidia/cuda:13.2.1-devel-ubuntu24.04
+FROM nvidia/cuda:13.3.0-devel-ubuntu26.04
 
 # Non-interactive apt, unbuffered Python
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -18,7 +18,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# --- Python + connection/auth tools (Ubuntu 24.04 default: python3.12) ---
+# --- Python + connection/auth tools (Ubuntu 26.04 default: python3.14) ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-dev \
         ca-certificates curl wget git openssh-client gnupg micro && \
