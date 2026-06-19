@@ -1,0 +1,47 @@
+{% set name = "zflows" %}
+{% set version = "0.6.2" %}
+
+package:
+  name: {{ name }}
+  version: {{ version }}
+
+source:
+  url: https://github.com/xuda-ye-math/zflows/archive/refs/tags/v{{ version }}.tar.gz
+  sha256: 73c84550e5933ad1f2ff6488087bdb7cd36940c8f479d44f87df6aadbfd988bd
+
+build:
+  noarch: python
+  number: 0
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+
+requirements:
+  host:
+    - python >=3.10
+    - pip
+    - setuptools >=61
+  run:
+    - python >=3.10
+    - pytorch >=2.7.0
+    - numpy >=2.0.0
+
+test:
+  commands:
+    - pip check
+  requires:
+    - pip
+
+about:
+  home: https://github.com/xuda-ye-math/zflows
+  license: MIT
+  license_family: MIT
+  summary: PyTorch normalizing flows for unconditional energy-based sampling and Boltzmann generators.
+  description: |
+    Self-contained PyTorch normalizing flows on R^d and the torus, oriented at
+    energy-based sampling and Boltzmann generators (reverse/forward KL, OT-Flow,
+    Langevin/HMC/L-BFGS, importance sampling, SMC).
+  dev_url: https://github.com/xuda-ye-math/zflows
+  doc_url: https://github.com/xuda-ye-math/zflows
+
+extra:
+  recipe-maintainers:
+    - xuda-ye-math
